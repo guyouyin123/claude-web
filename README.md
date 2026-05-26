@@ -5,7 +5,7 @@
 ## 启动
 
 ```bash
-cd /Users/jeff/Desktop/claude
+cd claude-web项目中
 npm install   # 首次需要
 node server.js
 ```
@@ -46,3 +46,19 @@ PORT=8080 node server.js
 ## 数据来源
 
 只读访问 `~/.claude/projects/`，不写入任何文件。会话索引保存在内存中。
+
+**配置claude的路径**
+
+![image](https://img2024.cnblogs.com/blog/1736414/202605/1736414-20260526095755906-768935349.png)
+
+**标签管理**
+
+![image](https://img2024.cnblogs.com/blog/1736414/202605/1736414-20260526095846344-1136647341.png)
+
+**会话搜索、模糊查询、标签管理、收藏、置顶**
+
+![image](https://img2024.cnblogs.com/blog/1736414/202605/1736414-20260526095325637-1994515318.png)
+
+**统计看板**
+
+![image](https://img2024.cnblogs.com/blog/1736414/202605/1736414-20260526095541867-1401288135.png)
