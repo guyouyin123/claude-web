@@ -1,0 +1,13 @@
+{
+  "name": "claude-session-viewer",
+  "version": "1.0.0",
+  "description": "查看 Claude Code 本地历史会话",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.3",
+    "express": "^4.19.2"
+  }
+}

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>Claude 会话查看器</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <div class="title">Claude 会话</div>
+        <div class="search-row">
+          <input id="search" type="text" placeholder="搜索用户消息 / 项目路径 / 标签..." />
+          <button id="stats-btn" title="全局统计">📊</button>
+          <button id="refresh" title="重扫文件系统">↻</button>
+          <button id="tags-btn" title="管理标签">🏷</button>
+          <button id="settings-btn" title="设置 claudeDir 路径">⚙</button>
+        </div>
+        <div class="filter-tabs" id="filter-tabs">
+          <button class="filter-tab active" data-filter="all">全部</button>
+          <button class="filter-tab" data-filter="pinned">📌 置顶</button>
+          <button class="filter-tab" data-filter="favorite">★ 收藏</button>
+        </div>
+        <div class="tag-filter-row" id="tag-filter-row" hidden>
+          <span class="filter-label">标签</span>
+          <span class="tag-filter-chips" id="tag-filter-chips"></span>
+          <button id="tag-filter-clear" class="tag-clear-btn" hidden>清空</button>
+        </div>
+        <div class="filter-row">
+          <label class="filter-label">时间</label>
+          <select id="time-range" class="time-range-select">
+            <option value="all">全部</option>
+            <option value="7d">近 7 天</option>
+            <option value="30d">近 30 天</option>
+            <option value="90d">近 90 天</option>
+            <option value="custom">自定义...</option>
+          </select>
+          <input id="time-from" type="date" class="time-date" hidden />
+          <input id="time-to" type="date" class="time-date" hidden />
+        </div>
+        <div id="stats" class="stats"></div>
+      </div>
+      <div id="session-list" class="session-list"></div>
+    </aside>
+    <main id="detail">
+      <div class="empty" id="empty-tip">← 选择左侧会话查看内容</div>
+      <div id="detail-content" class="detail-content" hidden>
+        <header class="detail-header" id="detail-header"></header>
+        <div id="messages" class="messages"></div>
+      </div>
+    </main>
+  </div>
+  <div id="stats-overlay" class="stats-overlay" hidden>
+    <div class="stats-head">
+      <span class="stats-title">📊 全局统计</span>
+      <button class="btn" id="stats-close">关闭</button>
+    </div>
+    <div class="stats-body" id="stats-body"></div>
+  </div>
+  <div id="tags-modal" class="modal" hidden>
+    <div class="modal-backdrop"></div>
+    <div class="modal-dialog modal-dialog-wide">
+      <div class="modal-header">标签管理</div>
+      <div class="modal-body">
+        <div class="tag-create-row">
+          <input id="tag-new-name" type="text" placeholder="新建标签名（如 debug / 需求 / 学习）" maxlength="30" />
+          <input id="tag-new-color" type="color" value="#58a6ff" title="颜色" />
+          <button class="btn btn-primary" id="tag-create-btn">添加</button>
+        </div>
+        <div class="form-msg" id="tag-create-msg"></div>
+        <div class="tag-library-list" id="tag-library-list"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="tags-close">关闭</button>
+      </div>
+    </div>
+  </div>
+  <div id="settings-modal" class="modal" hidden>
+    <div class="modal-backdrop"></div>
+    <div class="modal-dialog">
+      <div class="modal-header">设置 · Claude 路径</div>
+      <div class="modal-body">
+        <label class="form-label" for="claude-dir-input">claudeDir（绝对路径）</label>
+        <input id="claude-dir-input" type="text" placeholder="/Users/your-name/.claude" spellcheck="false" autocapitalize="off" autocomplete="off" />
+        <div class="form-hint" id="claude-dir-hint">将持久化到项目根 config.json，保存后立即重扫索引。</div>
+        <div class="form-msg" id="settings-msg"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="settings-cancel">取消</button>
+        <button class="btn btn-primary" id="settings-save">保存</button>
+      </div>
+    </div>
+  </div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

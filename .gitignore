@@ -1,0 +1,14 @@
+.vscode
+*.exe
+*.log
+.idea
+.DS_Store
+.history
+go.sum
+*.gz
+*.tar
+*.deployer
+data
+logs
+tmp
+.node_modules
