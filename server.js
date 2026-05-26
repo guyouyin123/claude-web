@@ -1,66 +1,143 @@
+#!/usr/bin/env node
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const readline = require('readline');
+const { execFile } = require('child_process');
 const chokidar = require('chokidar');
 
-const CFG_PATH = path.join(__dirname, 'config.json');
+// ============== 存储布局 ==============
+//
+//   ~/.claude-web/bootstrap.json   →  只存 claudeDir 路径覆盖（用户在 UI 改路径时写入）
+//
+//   <claudeDir>/claude-web/        →  本工具所有用户数据，缺失则创建
+//     ├── config.json              tags 库 + 分配
+//     ├── session-names.json       会话自定义名映射
+//     ├── pinned.json              置顶会话 id 数组
+//     └── favorite.json            收藏会话 id 数组
+//
+// 优先级：env CLAUDE_DIR > bootstrap.json.claudeDir > ~/.claude
+// 优先级：env PORT > --port > bootstrap.json.port > 2888
 
-function readConfigFile() {
+function ensureDir(p) {
+  if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
+}
+function atomicWriteJson(filePath, obj) {
+  ensureDir(path.dirname(filePath));
+  const tmp = filePath + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', 'utf8');
+  fs.renameSync(tmp, filePath);
+}
+function readJsonOr(filePath, fallback) {
   try {
-    if (fs.existsSync(CFG_PATH)) return JSON.parse(fs.readFileSync(CFG_PATH, 'utf8')) || {};
+    if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, 'utf8'));
   } catch (e) {
-    console.warn('config.json 解析失败:', e.message);
+    console.warn(`解析 ${path.basename(filePath)} 失败:`, e.message);
   }
-  return {};
+  return fallback;
 }
 
-function writeConfigFile(patch) {
-  const existing = readConfigFile();
-  const merged = { ...existing, ...patch };
-  const tmp = CFG_PATH + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(merged, null, 2) + '\n', 'utf8');
-  fs.renameSync(tmp, CFG_PATH);
+const BOOTSTRAP_DIR = process.env.CLAUDE_WEB_HOME || path.join(os.homedir(), '.claude-web');
+const BOOTSTRAP_FILE = path.join(BOOTSTRAP_DIR, 'bootstrap.json');
+
+function readBootstrap() { return readJsonOr(BOOTSTRAP_FILE, {}); }
+function writeBootstrap(patch) {
+  const merged = { ...readBootstrap(), ...patch };
+  atomicWriteJson(BOOTSTRAP_FILE, merged);
   return merged;
 }
 
-function loadConfig() {
-  const cfg = readConfigFile();
-  // 优先级：环境变量 > config.json > 默认值
-  const claudeDir = process.env.CLAUDE_DIR || cfg.claudeDir || path.join(os.homedir(), '.claude');
-  const port = process.env.PORT || cfg.port || 3000;
-  return { claudeDir, port };
+const BOOT = readBootstrap();
+const DEFAULT_PORT = 2888;
+const CLAUDE_DIR = process.env.CLAUDE_DIR || BOOT.claudeDir || path.join(os.homedir(), '.claude');
+let PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
+const CONFIG = { claudeDir: CLAUDE_DIR, port: Number(process.env.PORT) || BOOT.port || DEFAULT_PORT };
+
+// 应用数据目录（<claudeDir>/claude-web/）
+let APP_DIR = path.join(CONFIG.claudeDir, 'claude-web');
+function appPath(name) { return path.join(APP_DIR, name); }
+function refreshAppPaths() {
+  APP_DIR = path.join(CONFIG.claudeDir, 'claude-web');
+  ensureDir(APP_DIR);
+}
+ensureDir(APP_DIR);
+
+function readConfigFile() { return readJsonOr(appPath('config.json'), {}); }
+function writeConfigFile(patch) {
+  const merged = { ...readConfigFile(), ...patch };
+  atomicWriteJson(appPath('config.json'), merged);
+  return merged;
 }
 
-const CONFIG = loadConfig();
-let PROJECTS_DIR = path.join(CONFIG.claudeDir, 'projects');
-const PORT = CONFIG.port;
-
-const DATA_DIR = path.join(__dirname, 'data');
-const NAMES_FILE = path.join(DATA_DIR, 'session-names.json');
+// 一次性迁移：旧版（项目目录或 ~/.claude-web/data/）的数据搬到新位置
+function migrateLegacyData() {
+  const candidates = [
+    {
+      legacyCfg: path.join(__dirname, 'config.json'),
+      legacyNames: path.join(__dirname, 'data', 'session-names.json'),
+    },
+    {
+      legacyCfg: path.join(BOOTSTRAP_DIR, 'config.json'),
+      legacyNames: path.join(BOOTSTRAP_DIR, 'data', 'session-names.json'),
+    },
+  ];
+  for (const c of candidates) {
+    try {
+      // 旧 config.json → 拆分：claudeDir 进 bootstrap，其余进 app config
+      if (fs.existsSync(c.legacyCfg) && !fs.existsSync(appPath('config.json'))) {
+        const legacy = readJsonOr(c.legacyCfg, {});
+        // 旧 port 是上版默认 3000，不视为用户主动设置，丢弃；只迁 claudeDir 到 bootstrap
+        const { claudeDir: legacyClaudeDir, port: _legacyPort, ...rest } = legacy;
+        if (Object.keys(rest).length) atomicWriteJson(appPath('config.json'), rest);
+        if (legacyClaudeDir && !readBootstrap().claudeDir) {
+          writeBootstrap({ claudeDir: legacyClaudeDir });
+        }
+        console.log(`[迁移] ${c.legacyCfg} → ${appPath('config.json')}`);
+      }
+      // 旧 session-names.json
+      if (fs.existsSync(c.legacyNames) && !fs.existsSync(appPath('session-names.json'))) {
+        const legacy = readJsonOr(c.legacyNames, {});
+        if (Object.keys(legacy).length) {
+          atomicWriteJson(appPath('session-names.json'), legacy);
+          console.log(`[迁移] ${c.legacyNames} → ${appPath('session-names.json')}`);
+        }
+      }
+    } catch (e) {
+      console.warn('迁移旧数据失败:', e.message);
+    }
+  }
+}
 
 // 内存索引：sessionId -> { meta, searchText, filePath }
 const sessionIndex = new Map();
 // 自定义名称：sessionId -> string
 let sessionNames = {};
+// 置顶 / 收藏：Set<sessionId>
+let pinnedSet = new Set();
+let favoriteSet = new Set();
 
 function loadNames() {
-  try {
-    if (fs.existsSync(NAMES_FILE)) {
-      sessionNames = JSON.parse(fs.readFileSync(NAMES_FILE, 'utf8')) || {};
-    }
-  } catch (e) {
-    console.warn('session-names.json 解析失败，使用空对象:', e.message);
-    sessionNames = {};
-  }
+  sessionNames = readJsonOr(appPath('session-names.json'), {}) || {};
+}
+function saveNames() {
+  atomicWriteJson(appPath('session-names.json'), sessionNames);
 }
 
-function saveNames() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = NAMES_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(sessionNames, null, 2) + '\n', 'utf8');
-  fs.renameSync(tmp, NAMES_FILE);
+function loadPinned() {
+  const arr = readJsonOr(appPath('pinned.json'), []);
+  pinnedSet = new Set(Array.isArray(arr) ? arr : []);
+}
+function savePinned() {
+  atomicWriteJson(appPath('pinned.json'), [...pinnedSet]);
+}
+
+function loadFavorite() {
+  const arr = readJsonOr(appPath('favorite.json'), []);
+  favoriteSet = new Set(Array.isArray(arr) ? arr : []);
+}
+function saveFavorite() {
+  atomicWriteJson(appPath('favorite.json'), [...favoriteSet]);
 }
 
 // ---------- Tag 系统 ----------
@@ -554,6 +631,8 @@ app.delete('/api/sessions/:id', (req, res) => {
     delete sessionNames[id];
     try { saveNames(); } catch (e) { console.warn('清理名称失败:', e.message); }
   }
+  if (pinnedSet.delete(id)) { try { savePinned(); } catch {} }
+  if (favoriteSet.delete(id)) { try { saveFavorite(); } catch {} }
   res.json({ ok: true, sessionId: id, deletedFile: entry.filePath });
 });
 
@@ -709,6 +788,25 @@ app.put('/api/sessions/:id/tags', (req, res) => {
   res.json({ ok: true, sessionId: sid, tags: tagAssignments[sid] || [] });
 });
 
+// ---------- Pinned / Favorite ----------
+app.get('/api/preferences', (req, res) => {
+  res.json({ pinned: [...pinnedSet], favorite: [...favoriteSet] });
+});
+
+app.put('/api/preferences/pinned', (req, res) => {
+  const ids = Array.isArray(req.body && req.body.ids) ? req.body.ids : [];
+  pinnedSet = new Set(ids.filter(x => typeof x === 'string'));
+  try { savePinned(); } catch (e) { return res.status(500).json({ error: e.message }); }
+  res.json({ ok: true, pinned: [...pinnedSet] });
+});
+
+app.put('/api/preferences/favorite', (req, res) => {
+  const ids = Array.isArray(req.body && req.body.ids) ? req.body.ids : [];
+  favoriteSet = new Set(ids.filter(x => typeof x === 'string'));
+  try { saveFavorite(); } catch (e) { return res.status(500).json({ error: e.message }); }
+  res.json({ ok: true, favorite: [...favoriteSet] });
+});
+
 app.put('/api/sessions/:id/name', (req, res) => {
   const id = req.params.id;
   if (!sessionIndex.has(id)) return res.status(404).json({ error: '会话不存在' });
@@ -744,16 +842,21 @@ app.post('/api/config', async (req, res) => {
   const newProjectsDir = path.join(claudeDir, 'projects');
   const projectsExists = fs.existsSync(newProjectsDir);
 
-  // 持久化到 config.json（保留 tags 等其他字段）
+  // 持久化到 bootstrap.json（只存 claudeDir 覆盖）
   try {
-    writeConfigFile({ claudeDir });
+    writeBootstrap({ claudeDir });
   } catch (e) {
-    return res.status(500).json({ error: '写入 config.json 失败: ' + e.message });
+    return res.status(500).json({ error: '写入 bootstrap.json 失败: ' + e.message });
   }
 
-  // 更新运行时配置并重建索引
+  // 更新运行时配置：claudeDir 变了，APP_DIR 跟着换；重新加载所有数据
   CONFIG.claudeDir = claudeDir;
   PROJECTS_DIR = newProjectsDir;
+  refreshAppPaths();
+  loadNames();
+  loadTags();
+  loadPinned();
+  loadFavorite();
   await buildIndex();
   startWatcher();
   res.json({
@@ -765,15 +868,108 @@ app.post('/api/config', async (req, res) => {
   });
 });
 
+function openBrowser(url) {
+  const cmd = process.platform === 'darwin' ? 'open'
+            : process.platform === 'win32' ? 'start'
+            : 'xdg-open';
+  try {
+    const args = process.platform === 'win32' ? ['', url] : [url];
+    execFile(cmd, args, { shell: process.platform === 'win32' }, () => {});
+  } catch {}
+}
+
+function killPortOccupant(port) {
+  return new Promise((resolve) => {
+    if (process.platform === 'win32') {
+      // Windows：netstat 找 PID + taskkill
+      execFile('cmd', ['/c',
+        `for /f "tokens=5" %a in ('netstat -ano ^| findstr :${port} ^| findstr LISTENING') do taskkill /PID %a /F`
+      ], () => resolve());
+    } else {
+      // macOS / Linux：lsof + kill -9
+      execFile('sh', ['-c', `lsof -ti :${port} | xargs -r kill -9`], () => resolve());
+    }
+  });
+}
+
+function listenOnce(app, port) {
+  return new Promise((resolve, reject) => {
+    const srv = app.listen(port);
+    srv.once('listening', () => resolve(srv));
+    srv.once('error', reject);
+  });
+}
+
+async function listenWithKillFallback(app, port) {
+  try {
+    const srv = await listenOnce(app, port);
+    return { server: srv, port };
+  } catch (err) {
+    if (err.code !== 'EADDRINUSE') throw err;
+    console.log(`端口 ${port} 被占用，正在关闭占用进程...`);
+    await killPortOccupant(port);
+    // 给系统几百毫秒释放端口
+    await new Promise(r => setTimeout(r, 800));
+    const srv = await listenOnce(app, port);
+    console.log(`已重新占用端口 ${port}`);
+    return { server: srv, port };
+  }
+}
+
 (async () => {
-  console.log('使用 claudeDir:', CONFIG.claudeDir);
-  console.log('扫描中:', PROJECTS_DIR);
+  const args = process.argv.slice(2);
+  const noOpen = args.includes('--no-open') || process.env.CLAUDE_WEB_NO_OPEN === '1';
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(`claude-web — 本地查看 Claude Code 历史会话
+
+用法:
+  claude-web [选项]
+
+选项:
+  --no-open          启动后不自动打开浏览器
+  --port <number>    指定端口（默认 ${DEFAULT_PORT}，被占用时自动杀进程重启）
+  -h, --help         显示帮助
+
+环境变量:
+  CLAUDE_DIR         覆盖 Claude 数据目录（默认 ~/.claude）
+  CLAUDE_WEB_HOME    覆盖 bootstrap 配置目录（默认 ~/.claude-web）
+  PORT               覆盖端口
+
+数据存放:
+  bootstrap (claudeDir 路径覆盖) → ~/.claude-web/bootstrap.json
+  应用数据 (tags/names/pinned/fav) → <claudeDir>/claude-web/
+`);
+    process.exit(0);
+  }
+  const portIdx = args.indexOf('--port');
+  if (portIdx >= 0 && args[portIdx + 1]) {
+    const p = parseInt(args[portIdx + 1], 10);
+    if (Number.isFinite(p)) CONFIG.port = p;
+  }
+
+  console.log('claudeDir   :', CONFIG.claudeDir);
+  console.log('应用数据目录:', APP_DIR);
+  console.log('扫描中      :', PROJECTS_DIR);
+  migrateLegacyData();
   loadNames();
   loadTags();
-  console.log(`已加载 ${Object.keys(sessionNames).length} 个自定义名称、${tagLibrary.length} 个 tag`);
+  loadPinned();
+  loadFavorite();
+  console.log(`已加载 ${Object.keys(sessionNames).length} 个自定义名、${tagLibrary.length} 个 tag、${pinnedSet.size} 个置顶、${favoriteSet.size} 个收藏`);
   await buildIndex();
   startWatcher();
-  app.listen(PORT, () => {
-    console.log(`服务已启动: http://localhost:${PORT}`);
-  });
+  try {
+    const { port } = await listenWithKillFallback(app, CONFIG.port || DEFAULT_PORT);
+    const url = `http://localhost:${port}`;
+    console.log(`\n✓ 服务已启动: ${url}`);
+    if (!fs.existsSync(PROJECTS_DIR)) {
+      console.log(`⚠ 未发现 ${PROJECTS_DIR}，请打开页面右上角 ⚙ 配置正确的 Claude 目录。`);
+    }
+    if (!noOpen) {
+      setTimeout(() => openBrowser(url), 600);
+    }
+  } catch (e) {
+    console.error('启动失败:', e.message);
+    process.exit(1);
+  }
 })();

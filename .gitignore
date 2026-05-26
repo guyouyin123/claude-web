@@ -1,14 +1,12 @@
-.vscode
-*.exe
+node_modules/
+data/
+config.json
 *.log
-.idea
 .DS_Store
-.history
-go.sum
-*.gz
-*.tar
-*.deployer
-data
-logs
-tmp
-.node_modules
+.vscode/
+.idea/
+.history/
+*.tgz
+
+# 本地发布脚本（含 npm token，禁止提交）
+release.sh

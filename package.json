@@ -1,10 +1,43 @@
 {
-  "name": "claude-session-viewer",
+  "name": "claude-web-gyy",
   "version": "1.0.0",
-  "description": "查看 Claude Code 本地历史会话",
+  "description": "本地查看 Claude Code 历史会话的 Web 工具：搜索、自定义名/标签、token 统计、文件变化实时同步。",
   "main": "server.js",
+  "bin": {
+    "claude-web": "server.js",
+    "claude-web-gyy": "server.js"
+  },
   "scripts": {
     "start": "node server.js"
+  },
+  "files": [
+    "server.js",
+    "public/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "anthropic",
+    "session",
+    "viewer",
+    "history",
+    "cli",
+    "web"
+  ],
+  "author": "guyouyin <guyouyin@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/guyouyin/claude-web#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/guyouyin/claude-web.git"
+  },
+  "bugs": {
+    "url": "https://github.com/guyouyin/claude-web/issues"
   },
   "dependencies": {
     "chokidar": "^4.0.3",

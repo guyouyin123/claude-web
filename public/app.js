@@ -29,8 +29,8 @@ const state = {
   query: '',
   rendered: 0,
   filter: 'all',       // 'all' | 'pinned' | 'favorite'
-  pinned: loadIdSet(LS_PINNED),
-  favorite: loadIdSet(LS_FAVORITE),
+  pinned: new Set(),      // 启动时从 /api/preferences 拉
+  favorite: new Set(),    // 启动时从 /api/preferences 拉
   timeRange: localStorage.getItem(LS_TIME_RANGE) || 'all',
   timeFrom: localStorage.getItem(LS_TIME_FROM) || '',
   timeTo: localStorage.getItem(LS_TIME_TO) || '',
@@ -40,6 +40,37 @@ const state = {
 
 function tagById(id) {
   return state.tagLibrary.find(t => t.id === id);
+}
+
+async function loadPreferences() {
+  try {
+    const res = await fetch('/api/preferences');
+    const data = await res.json();
+    state.pinned = new Set(data.pinned || []);
+    state.favorite = new Set(data.favorite || []);
+  } catch (e) { console.warn('preferences 加载失败', e); }
+
+  // 一次性迁移：若服务端为空，但旧 localStorage 还有，推到服务端
+  try {
+    const oldPin = JSON.parse(localStorage.getItem(LS_PINNED) || '[]');
+    const oldFav = JSON.parse(localStorage.getItem(LS_FAVORITE) || '[]');
+    let migrated = false;
+    if (state.pinned.size === 0 && Array.isArray(oldPin) && oldPin.length) {
+      state.pinned = new Set(oldPin);
+      await persistPinned();
+      migrated = true;
+    }
+    if (state.favorite.size === 0 && Array.isArray(oldFav) && oldFav.length) {
+      state.favorite = new Set(oldFav);
+      await persistFavorite();
+      migrated = true;
+    }
+    if (migrated) {
+      localStorage.removeItem(LS_PINNED);
+      localStorage.removeItem(LS_FAVORITE);
+      console.log('已将浏览器本地的置顶/收藏迁移到服务端');
+    }
+  } catch {}
 }
 
 async function loadTagLibrary() {
@@ -284,10 +315,9 @@ async function deleteSession(s) {
       throw new Error(err.error || `HTTP ${res.status}`);
     }
     state.allSessions = state.allSessions.filter(x => x.sessionId !== s.sessionId);
+    // 服务端的 DELETE 已经清理了 pinned/favorite，前端同步内存即可
     state.pinned.delete(s.sessionId);
     state.favorite.delete(s.sessionId);
-    saveIdSet(LS_PINNED, state.pinned);
-    saveIdSet(LS_FAVORITE, state.favorite);
     if (state.currentId === s.sessionId) {
       state.currentId = null;
       detailContent.hidden = true;
@@ -299,18 +329,38 @@ async function deleteSession(s) {
   }
 }
 
+async function persistPinned() {
+  try {
+    await fetch('/api/preferences/pinned', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: [...state.pinned] }),
+    });
+  } catch (e) { console.warn('保存置顶失败', e); }
+}
+
+async function persistFavorite() {
+  try {
+    await fetch('/api/preferences/favorite', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: [...state.favorite] }),
+    });
+  } catch (e) { console.warn('保存收藏失败', e); }
+}
+
 function togglePin(id) {
   if (state.pinned.has(id)) state.pinned.delete(id);
   else state.pinned.add(id);
-  saveIdSet(LS_PINNED, state.pinned);
   applyFilterAndSort();
+  persistPinned();
 }
 
 function toggleFavorite(id) {
   if (state.favorite.has(id)) state.favorite.delete(id);
   else state.favorite.add(id);
-  saveIdSet(LS_FAVORITE, state.favorite);
   applyFilterAndSort();
+  persistFavorite();
 }
 
 async function copyResumeCommand(sessionId, btn) {
@@ -1225,8 +1275,8 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape' && !statsOverlay.hidden) closeStats();
 });
 
-// 启动顺序：先拉 tag 库再拉会话列表，保证卡片渲染时 tag 已就绪
-loadTagLibrary().then(() => {
+// 启动顺序：tag 库 + 用户偏好（pin/fav）→ 再拉会话列表
+Promise.all([loadTagLibrary(), loadPreferences()]).then(() => {
   renderTagFilterRow();
   loadSessions();
 });
