@@ -86,6 +86,37 @@ npx claude-web-gyy
 - 自动打开默认浏览器到 **`http://localhost:2888`**
 - 在终端 `Ctrl+C` 停止服务
 
+### 后台常驻运行（关掉终端也不会停）
+
+**macOS / Linux**
+
+```bash
+nohup npx claude-web-gyy > ~/claude-web.log 2>&1 &
+```
+
+- `nohup` 让进程脱离当前终端，关 iTerm/Terminal 不会被 SIGHUP 杀掉
+- `--no-open` 防止每次都重复弹浏览器
+- 日志写到 `~/claude-web.log`，需要看就 `tail -f ~/claude-web.log`
+- 末尾的 `&` 让它在后台跑，立即把命令行交还给你
+
+随时停止：
+
+```bash
+lsof -ti :2888 | xargs kill
+```
+
+**Windows（PowerShell）**
+
+```powershell
+Start-Process -WindowStyle Hidden npx -ArgumentList "claude-web-gyy","--no-open" -RedirectStandardOutput "$env:USERPROFILE\claude-web.log"
+```
+
+随时停止：
+
+```powershell
+Get-NetTCPConnection -LocalPort 2888 | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+```
+
 ---
 
 ## 默认配置（零配置即用）
@@ -108,21 +139,44 @@ npx claude-web-gyy
 
 ### 1. 命令行参数
 
-```bash
-claude-web --help              # 查看所有选项
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `--port <number>` | `2888` | 指定监听端口；被占用时自动杀进程重启同端口 |
+| `--no-open` | — | 启动后不自动打开浏览器（后台/服务器/容器/CI 场景） |
+| `-h`, `--help` | — | 打印帮助并退出 |
 
-claude-web --no-open           # 不自动打开浏览器（远程/容器/CI 场景）
-claude-web --port 8080         # 指定端口
+**用法示例**
+
+```bash
+claude-web --help                       # 看所有选项
+claude-web --port 8080                  # 换端口
+claude-web --no-open                    # 不弹浏览器
+claude-web --port 8080 --no-open        # 组合使用
+```
+
+`npx` 和全局安装两种调用方式参数完全一致：
+
+```bash
+npx claude-web-gyy --port 8080 --no-open
 ```
 
 ### 2. 环境变量
 
 | 变量 | 作用 | 示例 |
 |---|---|---|
-| `PORT` | 端口 | `PORT=8080 claude-web` |
-| `CLAUDE_DIR` | Claude 数据目录 | `CLAUDE_DIR=/path/to/.claude claude-web` |
-| `CLAUDE_WEB_HOME` | bootstrap 配置目录 | `CLAUDE_WEB_HOME=/tmp/cw claude-web` |
-| `CLAUDE_WEB_NO_OPEN=1` | 不开浏览器 | 同 `--no-open` |
+| `PORT` | 端口（同 `--port`，但 env 优先级更高） | `PORT=8080 claude-web` |
+| `CLAUDE_DIR` | Claude 数据目录（覆盖 bootstrap 配置） | `CLAUDE_DIR=/path/to/.claude claude-web` |
+| `CLAUDE_WEB_HOME` | bootstrap 配置目录（默认 `~/.claude-web`） | `CLAUDE_WEB_HOME=/tmp/cw claude-web` |
+| `CLAUDE_WEB_NO_OPEN` | 设为 `1` 时等同于 `--no-open` | `CLAUDE_WEB_NO_OPEN=1 claude-web` |
+
+**组合示例**
+
+```bash
+# 指向另一台机器 rsync 过来的 .claude，固定端口 9000，不开浏览器
+CLAUDE_DIR=/backup/colleague-claude PORT=9000 claude-web --no-open
+```
+
+**优先级**：`环境变量 > 命令行参数 > bootstrap.json > 默认值`
 
 ### 3. App UI 里修改
 
