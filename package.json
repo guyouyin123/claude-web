@@ -1,6 +1,6 @@
 {
   "name": "claude-web-gyy",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "本地查看 Claude Code 历史会话的 Web 工具：搜索、自定义名/标签、token 统计、文件变化实时同步。",
   "main": "server.js",
   "bin": {
