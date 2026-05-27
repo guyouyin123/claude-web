@@ -559,13 +559,16 @@ function renderDetail(data) {
   detailHeader.querySelector('#h-tag-manage').addEventListener('click', openTagsModal);
 
   messagesEl.innerHTML = '';
-  // 过滤掉隐藏角色（工具结果）+ 纯工具调用的 assistant 消息
+  // 过滤规则：
+  // - 工具结果 (tool_result) 完全隐藏
+  // - assistant 消息：有文字/思考 → 显示；否则看是否含"有视觉价值"的工具（Edit/Write 等），有则显示，否则隐藏
   const visible = data.messages.filter(m => {
     if (HIDDEN_ROLES.has(m.role)) return false;
     if (m.role === 'assistant') {
-      // 仅含 tool_use（没有 text/thinking）的助手消息隐藏
       const hasContent = m.blocks.some(b => b.type === 'text' || b.type === 'thinking');
-      if (!hasContent) return false;
+      if (hasContent) return true;
+      const hasVisibleTool = m.blocks.some(b => b.type === 'tool_use' && VISIBLE_TOOLS.has(b.name));
+      return hasVisibleTool;
     }
     return true;
   });
@@ -580,6 +583,8 @@ function renderDetail(data) {
 
 const MSG_PAGE_SIZE = 100;
 const HIDDEN_ROLES = new Set(['tool_result']);
+// "有视觉价值"的工具：即便消息里没有文字，也要展示这些工具调用（因为有 diff 等可视化）
+const VISIBLE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
 function renderMessageGroup(container, slice) {
   // 按 sidechain 连续分组渲染；返回首个新建节点
@@ -808,7 +813,6 @@ function renderBlock(block, role) {
 function renderToolUse(block) {
   const el = document.createElement('div');
   el.className = 'tool-block';
-  const inputStr = typeof block.input === 'object' ? JSON.stringify(block.input, null, 2) : String(block.input);
   const preview = buildToolPreview(block.name, block.input);
 
   el.innerHTML = `
@@ -817,13 +821,107 @@ function renderToolUse(block) {
       <span class="tool-name">${escapeHtml(block.name)}</span>
       <span class="tool-preview">${escapeHtml(preview)}</span>
     </div>
-    <div class="tool-detail">
-      <div class="tool-label">参数</div>
-      <pre>${escapeHtml(inputStr)}</pre>
-    </div>
+    <div class="tool-detail"></div>
   `;
+  const detail = el.querySelector('.tool-detail');
+
+  // Edit / Write / MultiEdit 渲染成可视化 diff；其他工具显示 JSON 参数
+  if (block.name === 'Edit' && block.input) {
+    detail.appendChild(buildEditDiff(block.input));
+  } else if (block.name === 'Write' && block.input) {
+    detail.appendChild(buildWriteDiff(block.input));
+  } else if (block.name === 'MultiEdit' && block.input && Array.isArray(block.input.edits)) {
+    const pathRow = document.createElement('div');
+    pathRow.className = 'diff-filepath';
+    pathRow.textContent = block.input.file_path || '';
+    detail.appendChild(pathRow);
+    block.input.edits.forEach((e, i) => {
+      const sep = document.createElement('div');
+      sep.className = 'diff-section-label';
+      sep.textContent = `编辑 ${i + 1}/${block.input.edits.length}`;
+      detail.appendChild(sep);
+      detail.appendChild(buildDiffView(e.old_string || '', e.new_string || ''));
+    });
+  } else {
+    const inputStr = typeof block.input === 'object' ? JSON.stringify(block.input, null, 2) : String(block.input);
+    const label = document.createElement('div');
+    label.className = 'tool-label';
+    label.textContent = '参数';
+    detail.appendChild(label);
+    const pre = document.createElement('pre');
+    pre.textContent = inputStr;
+    detail.appendChild(pre);
+  }
+
   el.querySelector('.tool-summary').addEventListener('click', () => el.classList.toggle('open'));
   return el;
+}
+
+function buildEditDiff(input) {
+  const wrap = document.createDocumentFragment();
+  if (input.file_path) {
+    const p = document.createElement('div');
+    p.className = 'diff-filepath';
+    p.textContent = input.file_path + (input.replace_all ? '   （替换全部匹配）' : '');
+    wrap.appendChild(p);
+  }
+  wrap.appendChild(buildDiffView(input.old_string || '', input.new_string || ''));
+  return wrap;
+}
+
+function buildWriteDiff(input) {
+  const wrap = document.createDocumentFragment();
+  if (input.file_path) {
+    const p = document.createElement('div');
+    p.className = 'diff-filepath';
+    p.textContent = input.file_path + '   （整文件写入）';
+    wrap.appendChild(p);
+  }
+  // Write 视为全部新增
+  wrap.appendChild(buildDiffView('', input.content || ''));
+  return wrap;
+}
+
+const DIFF_MAX_LINES = 800;
+
+function buildDiffView(oldStr, newStr) {
+  const view = document.createElement('div');
+  view.className = 'diff-view';
+  if (!window.Diff || typeof Diff.diffLines !== 'function') {
+    // 降级：左旧右新两栏纯文本
+    view.innerHTML = `
+      <div class="diff-fallback">
+        <div><div class="diff-section-label">原内容</div><pre>${escapeHtml(oldStr)}</pre></div>
+        <div><div class="diff-section-label">新内容</div><pre>${escapeHtml(newStr)}</pre></div>
+      </div>
+    `;
+    return view;
+  }
+  const parts = Diff.diffLines(oldStr, newStr);
+  let rendered = 0;
+  let truncated = false;
+  for (const p of parts) {
+    const lines = p.value.split('\n');
+    if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+    const cls = p.added ? 'diff-add' : p.removed ? 'diff-del' : 'diff-eq';
+    const mark = p.added ? '+' : p.removed ? '-' : ' ';
+    for (const line of lines) {
+      if (rendered >= DIFF_MAX_LINES) { truncated = true; break; }
+      const row = document.createElement('div');
+      row.className = 'diff-line ' + cls;
+      row.innerHTML = `<span class="diff-mark">${mark}</span><span class="diff-text">${escapeHtml(line) || '&#8203;'}</span>`;
+      view.appendChild(row);
+      rendered++;
+    }
+    if (truncated) break;
+  }
+  if (truncated) {
+    const t = document.createElement('div');
+    t.className = 'diff-truncated';
+    t.textContent = `…（已截断，超过 ${DIFF_MAX_LINES} 行）`;
+    view.appendChild(t);
+  }
+  return view;
 }
 
 function renderToolResult(block) {
@@ -1274,6 +1372,21 @@ $('#stats-close').addEventListener('click', closeStats);
 document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape' && !statsOverlay.hidden) closeStats();
 });
+
+// ---- 主题切换（右上角下拉框） ----
+const THEMES = ['dark', 'mid', 'light'];
+const LS_THEME = 'cv.theme';
+const themeSelect = $('#theme-select');
+
+function applyTheme(t) {
+  if (!THEMES.includes(t)) t = 'dark';
+  if (t === 'dark') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', t);
+  themeSelect.value = t;
+  localStorage.setItem(LS_THEME, t);
+}
+applyTheme(localStorage.getItem(LS_THEME) || 'dark');
+themeSelect.addEventListener('change', () => applyTheme(themeSelect.value));
 
 // 启动顺序：tag 库 + 用户偏好（pin/fav）→ 再拉会话列表
 Promise.all([loadTagLibrary(), loadPreferences()]).then(() => {

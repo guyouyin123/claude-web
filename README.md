@@ -62,6 +62,9 @@ npm -v
 # 推荐：npx 临时运行，不留任何全局安装
 npx claude-web-gyy
 
+# 后台运行
+nohup npx claude-web-gyy > ~/claude-web.log 2>&1 &
+
 # 或者全局装一次，后面直接用 claude-web
 npm install -g claude-web-gyy
 claude-web
