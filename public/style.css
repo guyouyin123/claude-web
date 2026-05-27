@@ -655,10 +655,12 @@ html, body {
 /* 全局统计仪表盘 */
 .stats-overlay {
   position: fixed; inset: 0;
-  z-index: 1000;
+  z-index: 2000;          /* 高于 topbar (1000)，关闭按钮不被遮挡 */
   background: var(--bg-page);
   display: flex; flex-direction: column;
 }
+/* 统计面板打开时隐藏右上角 toolbar，避免视觉冲突 */
+body:has(#stats-overlay:not([hidden])) .topbar { display: none; }
 .stats-head {
   padding: 14px 24px;
   border-bottom: 1px solid var(--line-1);
@@ -1174,9 +1176,11 @@ html, body {
 /* Modal */
 .modal {
   position: fixed; inset: 0;
-  z-index: 100;
+  z-index: 2000;     /* 高于 topbar，弹窗按钮不被遮挡 */
   display: flex; align-items: center; justify-content: center;
 }
+/* 任何 modal 打开时也隐藏 topbar */
+body:has(.modal:not([hidden])) .topbar { display: none; }
 .modal-backdrop {
   position: absolute; inset: 0;
   background: rgba(0, 0, 0, 0.55);
