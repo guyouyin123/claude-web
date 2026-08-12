@@ -180,6 +180,28 @@ function decodeProjectPath(encoded) {
   return encoded;
 }
 
+// ---- 预计花费（USD）：Anthropic 官方单价（每 1M token）----
+const PRICING = {
+  opus: { in: 15, out: 75, cw: 18.75, cr: 1.5 },
+  sonnet: { in: 3, out: 15, cw: 3.75, cr: 0.3 },
+  haiku: { in: 1, out: 5, cw: 1.25, cr: 0.1 },
+};
+function priceFor(model) {
+  const m = (model || '').toLowerCase();
+  if (m.includes('opus')) return PRICING.opus;
+  if (m.includes('sonnet')) return PRICING.sonnet;
+  if (m.includes('haiku')) return PRICING.haiku;
+  return PRICING.opus; // 未知模型按 opus 估（占比最大）
+}
+// t: { totalInputUncached, totalCacheCreation, totalCacheRead, totalOutput }
+function estimateCostUSD(t, model) {
+  const p = priceFor(model);
+  return ((t.totalInputUncached || 0) * p.in
+    + (t.totalCacheCreation || 0) * p.cw
+    + (t.totalCacheRead || 0) * p.cr
+    + (t.totalOutput || 0) * p.out) / 1e6;
+}
+
 function extractTextFromContent(content) {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
@@ -317,6 +339,7 @@ async function parseSessionFile(filePath, projectPath) {
         lastContextSize,
         model: lastModel,
       },
+      estimatedCostUSD: estimateCostUSD({ totalInputUncached, totalCacheCreation, totalCacheRead, totalOutput }, lastModel),
     },
     searchText: searchChunks.join('\n').toLowerCase(),
     filePath,
@@ -646,11 +669,12 @@ app.get('/api/stats', (req, res) => {
   let totalOutput = 0;
   let totalCacheRead = 0;
   let totalCacheCreation = 0;
+  let totalInputUncached = 0;
 
   // 按项目 / 按日 / 按模型
   const byProject = new Map();   // projectPath -> { count, totalInput, totalOutput, latest }
   const byDay = new Map();        // YYYY-MM-DD -> { count, totalInput, totalOutput }
-  const byModel = new Map();      // model -> count
+  const byModel = new Map();      // model -> { count, input, inputUncached, cacheRead, cacheCreation, output }
 
   for (const e of entries) {
     const m = e.meta;
@@ -662,6 +686,7 @@ app.get('/api/stats', (req, res) => {
     totalOutput += t.totalOutput || 0;
     totalCacheRead += t.totalCacheRead || 0;
     totalCacheCreation += t.totalCacheCreation || 0;
+    totalInputUncached += t.totalInputUncached || 0;
 
     // by project
     const p = m.projectPath || '(未知)';
@@ -682,10 +707,34 @@ app.get('/api/stats', (req, res) => {
       dg.totalOutput += t.totalOutput || 0;
     }
 
-    // by model
+    // by model（累计各 token 组成，用于成本估算）
     const model = t.model || '(unknown)';
-    byModel.set(model, (byModel.get(model) || 0) + 1);
+    if (!byModel.has(model)) byModel.set(model, { model, count: 0, input: 0, inputUncached: 0, cacheRead: 0, cacheCreation: 0, output: 0 });
+    const mg = byModel.get(model);
+    mg.count++;
+    mg.input += t.totalInput || 0;
+    mg.inputUncached += t.totalInputUncached || 0;
+    mg.cacheRead += t.totalCacheRead || 0;
+    mg.cacheCreation += t.totalCacheCreation || 0;
+    mg.output += t.totalOutput || 0;
   }
+
+  // ---- 预计花费（USD）：按模型 token 组成 × Anthropic 官方单价（模块级 PRICING/priceFor）----
+  // 花费构成（4 类 token 各自的美元）——按各模型单价分别累计后求和
+  const costBreakdown = { inputUncached: 0, cacheCreation: 0, cacheRead: 0, output: 0 };
+  const byModelArr = Array.from(byModel.values()).map(mg => {
+    const p = priceFor(mg.model);
+    const cIn = mg.inputUncached * p.in / 1e6;
+    const cCw = mg.cacheCreation * p.cw / 1e6;
+    const cCr = mg.cacheRead * p.cr / 1e6;
+    const cOut = mg.output * p.out / 1e6;
+    costBreakdown.inputUncached += cIn;
+    costBreakdown.cacheCreation += cCw;
+    costBreakdown.cacheRead += cCr;
+    costBreakdown.output += cOut;
+    return { ...mg, costUSD: cIn + cCw + cCr + cOut };
+  }).sort((a, b) => b.costUSD - a.costUSD);
+  const estimatedCostUSD = byModelArr.reduce((s, m) => s + m.costUSD, 0);
 
   // Top 项目（按 totalInput 排）
   const topProjects = Array.from(byProject.values())
@@ -703,6 +752,7 @@ app.get('/api/stats', (req, res) => {
       endTime: m.endTime,
       totalInput: t.totalInput || 0,
       totalOutput: t.totalOutput || 0,
+      estimatedCostUSD: m.estimatedCostUSD || 0,
     };
   }).sort((a, b) => b.totalInput - a.totalInput).slice(0, 20);
 
@@ -715,15 +765,18 @@ app.get('/api/stats', (req, res) => {
       userMessages: totalUserMsgs,
       assistantMessages: totalAsstMsgs,
       input: totalInput,
+      inputUncached: totalInputUncached,
       output: totalOutput,
       cacheRead: totalCacheRead,
       cacheCreation: totalCacheCreation,
       cacheHitRate: totalInput ? totalCacheRead / totalInput : 0,
+      estimatedCostUSD,
+      costBreakdown,
     },
     topProjects,
     topSessions,
     daily,
-    byModel: Array.from(byModel.entries()).map(([model, count]) => ({ model, count })),
+    byModel: byModelArr,
   });
 });
 

@@ -252,6 +252,7 @@ function createSessionItem(s) {
   if (t && (t.totalInput || t.totalOutput)) {
     const win = contextWindowFor(t.model);
     const pct = win ? Math.min(100, Math.round(t.lastContextSize * 100 / win)) : 0;
+    const costStr = fmtUSD(s.estimatedCostUSD || 0);
     tokenLine = `
       <div class="session-tokens">
         <span title="累计输入 / 输出">累计 ${fmtTokens(t.totalInput)}↑ ${fmtTokens(t.totalOutput)}↓</span>
@@ -260,6 +261,9 @@ function createSessionItem(s) {
           <span class="ctx-bar-bg"><span class="ctx-bar-fill" style="width:${pct}%;"></span></span>
           <span class="ctx-bar-pct">${pct}%</span>
         </span>
+      </div>
+      <div class="session-cost-line" title="预计花费（按 Anthropic 官方单价估算）">
+        <span class="scl-ico">≈</span> 预计花费 <b>${costStr}</b>
       </div>
     `;
   }
@@ -498,6 +502,7 @@ function renderDetail(data) {
       <div class="h-tokens">
         <span class="tk-chip">累计输入 <b>${fmtTokens(t.totalInput)}</b></span>
         <span class="tk-chip">累计输出 <b>${fmtTokens(t.totalOutput)}</b></span>
+        <span class="tk-chip tk-cost" title="预计花费（按 Anthropic 官方单价估算）">预计花费 <b>${fmtUSD(m.estimatedCostUSD || 0)}</b></span>
         <span class="tk-chip">缓存命中 <b>${hitRate}%</b></span>
         <span class="tk-chip ctx-chip">
           末次上下文 <b>${fmtTokens(t.lastContextSize)}</b> / ${fmtTokens(win)}
@@ -1290,82 +1295,224 @@ async function openStats() {
 
 function closeStats() { statsOverlay.hidden = true; }
 
+// ---- 统计页视觉辅助 ----
+const STATS_ICONS = {
+  sessions: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
+  qa: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>',
+  input: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>',
+  output: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12l7 7 7-7"/></svg>',
+  cost: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>',
+};
+const MODEL_COLORS = ['#22d3ee', '#a78bfa', '#34d399', '#fbbf24', '#f472b6', '#60a5fa', '#f87171'];
+
+function fmtUSD(n) {
+  return '$' + (n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtUSDShort(n) {
+  n = n || 0;
+  if (n >= 1000) return '$' + (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+  return '$' + n.toFixed(0);
+}
+function animateCount(el, to, fmt) {
+  const dur = 1000, t0 = performance.now();
+  function step(now) {
+    const p = Math.min(1, (now - t0) / dur);
+    const e = 1 - Math.pow(1 - p, 3); // easeOutCubic
+    el.textContent = fmt(to * e);
+    if (p < 1) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+function kpiCard({ icon, label, accent, glow, valueTo, fmt, sub, extraClass = '', badge = '' }) {
+  return `<div class="kpi ${extraClass}" style="--kpi-accent:${accent};--kpi-glow:${glow};">
+    ${badge ? `<span class="kpi-cost-badge">${badge}</span>` : ''}
+    <div class="kpi-top"><span class="kpi-ico">${STATS_ICONS[icon]}</span><span class="kpi-label">${label}</span></div>
+    <div class="kpi-value" data-count="${valueTo}" data-fmt="${fmt}">0</div>
+    ${sub ? `<div class="kpi-sub">${sub}</div>` : ''}
+  </div>`;
+}
+
+// SVG 环形图（按花费分段），返回 svg 字符串
+function donutSVG(items, centerVal, centerLabel) {
+  const total = items.reduce((s, i) => s + i.value, 0) || 1;
+  const R = 62, C = 2 * Math.PI * R, cx = 85, cy = 85;
+  let offset = 0;
+  const segs = items.map((it, i) => {
+    const frac = it.value / total;
+    const len = frac * C;
+    const dash = `${len} ${C - len}`;
+    const seg = `<circle cx="${cx}" cy="${cy}" r="${R}" fill="none" stroke="${it.color}" stroke-width="14"
+      stroke-dasharray="${dash}" stroke-dashoffset="${-offset}" stroke-linecap="butt"
+      transform="rotate(-90 ${cx} ${cy})" style="filter:drop-shadow(0 0 6px ${it.color});">
+      <animate attributeName="stroke-dashoffset" from="${-C}" to="${-offset}" dur="0.9s" fill="freeze" calcMode="spline" keySplines="0.2 0.8 0.2 1" keyTimes="0;1"/></circle>`;
+    offset += len;
+    return seg;
+  }).join('');
+  return `<svg class="donut" viewBox="0 0 170 170">
+    <circle cx="${cx}" cy="${cy}" r="${R}" fill="none" stroke="rgba(120,170,255,0.08)" stroke-width="14"/>
+    ${segs}
+    <text class="donut-center-v" x="${cx}" y="${cy - 2}" text-anchor="middle" dominant-baseline="middle">${centerVal}</text>
+    <text class="donut-center-l" x="${cx}" y="${cy + 18}" text-anchor="middle">${centerLabel}</text>
+  </svg>`;
+}
+
+// SVG 面积图（每日输入 token 趋势）；W = 实际像素宽，1:1 渲染避免拉伸失真
+function areaChartSVG(daily, W = 900) {
+  const H = 180, padB = 22, padT = 12, padX = 6;
+  if (!daily.length) return '<div class="stats-empty">无数据</div>';
+  const max = Math.max(...daily.map(d => d.totalInput), 1);
+  const n = daily.length;
+  const xAt = i => padX + (n === 1 ? W / 2 : i * (W - 2 * padX) / (n - 1));
+  const yAt = v => padT + (H - padB - padT) * (1 - v / max);
+  const pts = daily.map((d, i) => [xAt(i), yAt(d.totalInput)]);
+  const line = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+  const area = `M${pts[0][0].toFixed(1)} ${(H - padB).toFixed(1)} ` +
+    pts.map(p => `L${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(' ') +
+    ` L${pts[n - 1][0].toFixed(1)} ${(H - padB).toFixed(1)} Z`;
+  const dots = pts.map((p, i) => `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.4" fill="#22d3ee" style="filter:drop-shadow(0 0 4px #22d3ee)"><title>${daily[i].day} · ${fmtTokens(daily[i].totalInput)}↑ · ${daily[i].count} 会话</title></circle>`).join('');
+  const step = Math.max(1, Math.ceil(n / 8));
+  const labels = daily.map((d, i) => (i % step === 0 || i === n - 1)
+    ? `<text class="axis-label" x="${xAt(i).toFixed(1)}" y="${H - 6}" text-anchor="middle">${d.day.slice(5)}</text>` : '').join('');
+  return `<svg class="area-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" shape-rendering="geometricPrecision">
+    <defs>
+      <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="rgba(34,211,238,0.45)"/>
+        <stop offset="100%" stop-color="rgba(34,211,238,0.02)"/>
+      </linearGradient>
+      <linearGradient id="lineGrad" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0%" stop-color="#3b82f6"/><stop offset="55%" stop-color="#22d3ee"/><stop offset="100%" stop-color="#a78bfa"/>
+      </linearGradient>
+    </defs>
+    <path d="${area}" fill="url(#areaGrad)"/>
+    <path d="${line}" fill="none" stroke="url(#lineGrad)" stroke-width="2.5" stroke-linejoin="round" vector-effect="non-scaling-stroke" style="filter:drop-shadow(0 0 5px rgba(34,211,238,0.45))"/>
+    ${dots}${labels}
+  </svg>`;
+}
+
+// 花费构成堆叠条：4 类 token 各自的美元占比
+function costBreakdownHTML(cb, total) {
+  if (!cb || !total) return '';
+  const items = [
+    { key: 'output', label: '输出', color: '#f472b6' },
+    { key: 'cacheRead', label: '缓存读', color: '#22d3ee' },
+    { key: 'cacheCreation', label: '缓存写', color: '#a78bfa' },
+    { key: 'inputUncached', label: '未缓存输入', color: '#34d399' },
+  ].map(it => ({ ...it, val: cb[it.key] || 0, pct: total ? (cb[it.key] || 0) / total * 100 : 0 }))
+    .sort((a, b) => b.val - a.val);
+  const segs = items.filter(i => i.pct > 0.05).map(i =>
+    `<span class="cb-seg" style="width:0;background:${i.color};" data-w="${i.pct.toFixed(2)}" title="${i.label} ${fmtUSD(i.val)} · ${i.pct.toFixed(1)}%"></span>`).join('');
+  const legend = items.map(i =>
+    `<div class="cb-item">
+      <span class="cb-dot" style="background:${i.color};"></span>
+      <span class="cb-label">${i.label}</span>
+      <span class="cb-val">${fmtUSD(i.val)}</span>
+      <span class="cb-pct">${i.pct.toFixed(1)}%</span>
+    </div>`).join('');
+  return `<div class="cost-break">
+    <div class="cb-title">花费构成 · 按 token 类型</div>
+    <div class="cb-bar">${segs}</div>
+    <div class="cb-legend">${legend}</div>
+  </div>`;
+}
+
 function renderStats(data) {
   const T = data.totals;
   const hitPct = Math.round(T.cacheHitRate * 100);
-  // 顶部卡片
-  const topCards = `
-    <div class="stats-cards">
-      <div class="stat-card"><div class="sc-label">总会话</div><div class="sc-value">${T.sessions}</div></div>
-      <div class="stat-card"><div class="sc-label">总问答</div><div class="sc-value">${T.userMessages} / ${T.assistantMessages}</div><div class="sc-sub">问 / 答</div></div>
-      <div class="stat-card"><div class="sc-label">累计输入</div><div class="sc-value">${fmtTokens(T.input)}</div><div class="sc-sub">cache hit ${hitPct}%</div></div>
-      <div class="stat-card"><div class="sc-label">累计输出</div><div class="sc-value">${fmtTokens(T.output)}</div></div>
-    </div>
-  `;
 
-  // 按项目（柱状）
+  const cards = [
+    kpiCard({ icon: 'sessions', label: '总会话', accent: '#38bdf8', glow: 'rgba(56,189,248,0.4)', valueTo: T.sessions, fmt: 'int' }),
+    kpiCard({ icon: 'qa', label: '总问答', accent: '#a78bfa', glow: 'rgba(167,139,250,0.4)', valueTo: T.assistantMessages, fmt: 'int', sub: `${T.userMessages} 问 · ${T.assistantMessages} 答` }),
+    kpiCard({ icon: 'input', label: '累计输入', accent: '#22d3ee', glow: 'rgba(34,211,238,0.4)', valueTo: T.input, fmt: 'tok', sub: `缓存命中 ${hitPct}%` }),
+    kpiCard({ icon: 'output', label: '累计输出', accent: '#f472b6', glow: 'rgba(244,114,182,0.4)', valueTo: T.output, fmt: 'tok' }),
+    kpiCard({ icon: 'cost', label: '预计花费 (USD)', accent: '#34d399', glow: 'rgba(52,211,153,0.45)', valueTo: T.estimatedCostUSD, fmt: 'usd', extraClass: 'kpi-cost', badge: '按官方单价估算', sub: `输入 ${fmtTokens(T.inputUncached)} · 缓存写 ${fmtTokens(T.cacheCreation)} · 缓存读 ${fmtTokens(T.cacheRead)} · 输出 ${fmtTokens(T.output)}` }),
+  ].join('');
+
   const maxProjInput = Math.max(...data.topProjects.map(p => p.totalInput), 1);
-  const projRows = data.topProjects.map(p => `
+  const projRows = data.topProjects.slice(0, 12).map(p => `
     <div class="bar-row">
       <span class="bar-label" title="${escapeHtml(p.project)}">${escapeHtml(shortProject(p.project))}</span>
-      <span class="bar-track"><span class="bar-fill" style="width:${(p.totalInput / maxProjInput * 100).toFixed(1)}%;"></span></span>
-      <span class="bar-meta">${p.count} 会话 · ${fmtTokens(p.totalInput)}↑ ${fmtTokens(p.totalOutput)}↓</span>
-    </div>
-  `).join('');
+      <span class="bar-track"><span class="bar-fill" data-w="${(p.totalInput / maxProjInput * 100).toFixed(1)}"></span></span>
+      <span class="bar-meta">${p.count} · ${fmtTokens(p.totalInput)}↑ ${fmtTokens(p.totalOutput)}↓</span>
+    </div>`).join('');
 
-  // 按日（迷你柱）
-  const maxDayInput = Math.max(...data.daily.map(d => d.totalInput), 1);
-  const dayBars = data.daily.map(d => `
-    <div class="day-bar" title="${d.day} · ${d.count} 会话 · ${fmtTokens(d.totalInput)}↑">
-      <span class="day-bar-fill" style="height:${(d.totalInput / maxDayInput * 100).toFixed(1)}%;"></span>
-      <span class="day-bar-label">${d.day.slice(5)}</span>
-    </div>
-  `).join('');
-
-  // Top 会话
-  const topSessRows = data.topSessions.slice(0, 10).map(s => {
-    const label = s.customName || s.titlePreview.slice(0, 50);
+  const topSessRows = data.topSessions.slice(0, 10).map((s, i) => {
+    const label = s.customName || (s.titlePreview || '').slice(0, 60);
     return `<div class="top-sess" data-id="${s.sessionId}">
-      <span class="ts-label">${escapeHtml(label)}</span>
-      <span class="ts-proj">${escapeHtml(shortProject(s.projectPath))}</span>
-      <span class="ts-tokens">${fmtTokens(s.totalInput)}↑ ${fmtTokens(s.totalOutput)}↓</span>
+      <span class="ts-rank">${i + 1}</span>
+      <span class="ts-main">
+        <div class="ts-label">${escapeHtml(label)}</div>
+        <div class="ts-proj">${escapeHtml(shortProject(s.projectPath))}</div>
+      </span>
+      <span class="ts-tokens"><span class="ts-cost">${fmtUSD(s.estimatedCostUSD || 0)}</span>${fmtTokens(s.totalInput)}↑ ${fmtTokens(s.totalOutput)}↓</span>
     </div>`;
   }).join('');
 
-  // 模型分布
-  const modelRows = data.byModel.map(m => `
-    <div class="model-row"><span>${escapeHtml(m.model)}</span><span>${m.count}</span></div>
-  `).join('');
+  // 模型分布：环形（按花费）+ 图例
+  const donutItems = data.byModel.filter(m => m.costUSD > 0).map((m, i) => ({
+    color: MODEL_COLORS[i % MODEL_COLORS.length], value: m.costUSD, model: m.model,
+  }));
+  const donut = donutItems.length
+    ? donutSVG(donutItems, fmtUSDShort(T.estimatedCostUSD), '总花费')
+    : '';
+  const legend = data.byModel.map((m, i) => `
+    <div class="legend-item">
+      <span class="legend-swatch" style="background:${MODEL_COLORS[i % MODEL_COLORS.length]};color:${MODEL_COLORS[i % MODEL_COLORS.length]};"></span>
+      <span class="legend-name" title="${escapeHtml(m.model)}">${escapeHtml(m.model)}</span>
+      <span class="legend-val">${m.count} 会话 · <span class="legend-cost">${fmtUSD(m.costUSD)}</span></span>
+    </div>`).join('');
 
   statsBody.innerHTML = `
-    ${topCards}
+    <div class="stats-cards">${cards}</div>
     <div class="stats-grid">
-      <section class="stats-section">
-        <h3>按项目 (Top ${data.topProjects.length})</h3>
-        <div class="bar-list">${projRows || '<div class="stats-empty">无数据</div>'}</div>
+      <section class="panel model-panel">
+        <h3><span class="dot"></span>模型分布 · 花费占比</h3>
+        <div class="donut-wrap">${donut}<div class="legend">${legend || '<div class="stats-empty">无数据</div>'}</div></div>
+        ${costBreakdownHTML(T.costBreakdown, T.estimatedCostUSD)}
       </section>
-      <section class="stats-section">
-        <h3>按日活跃度（输入 token 趋势）</h3>
-        <div class="day-bars">${dayBars || '<div class="stats-empty">无数据</div>'}</div>
-      </section>
-      <section class="stats-section">
-        <h3>消耗最大的会话 (Top 10)</h3>
+      <section class="panel">
+        <h3><span class="dot" style="background:#a78bfa;box-shadow:0 0 10px #a78bfa"></span>消耗最大的会话 · Top 10</h3>
         <div class="top-sess-list">${topSessRows || '<div class="stats-empty">无数据</div>'}</div>
       </section>
-      <section class="stats-section">
-        <h3>模型分布</h3>
-        <div class="model-list">${modelRows || '<div class="stats-empty">无数据</div>'}</div>
+      <section class="panel wide">
+        <h3><span class="dot" style="background:#22d3ee;box-shadow:0 0 10px #22d3ee"></span>每日活跃度 · 输入 token 趋势</h3>
+        <div class="area-host">${areaChartSVG(data.daily)}</div>
+      </section>
+      <section class="panel wide">
+        <h3><span class="dot" style="background:#3b82f6;box-shadow:0 0 10px #3b82f6"></span>按项目 · 输入 token (Top ${Math.min(12, data.topProjects.length)})</h3>
+        <div class="bar-list">${projRows || '<div class="stats-empty">无数据</div>'}</div>
       </section>
     </div>
   `;
+
+  // 数字滚动动画
+  statsBody.querySelectorAll('.kpi-value[data-count]').forEach(el => {
+    const to = parseFloat(el.dataset.count) || 0;
+    const kind = el.dataset.fmt;
+    const fmt = kind === 'usd' ? fmtUSD : kind === 'tok' ? fmtTokens : (v => Math.round(v).toLocaleString('en-US'));
+    animateCount(el, to, fmt);
+  });
+  // 柱子/堆叠条入场动画
+  requestAnimationFrame(() => statsBody.querySelectorAll('.bar-fill[data-w], .cb-seg[data-w]').forEach(el => { el.style.width = el.dataset.w + '%'; }));
+  // 面积图按真实像素宽重绘（1:1，避免拉伸失真）
+  _statsDaily = data.daily;
+  requestAnimationFrame(renderAreaAtRealWidth);
   // 点击 Top 会话定位
   statsBody.querySelectorAll('.top-sess').forEach(el => {
-    el.addEventListener('click', () => {
-      closeStats();
-      selectSession(el.dataset.id);
-    });
+    el.addEventListener('click', () => { closeStats(); selectSession(el.dataset.id); });
   });
 }
+
+let _statsDaily = [];
+function renderAreaAtRealWidth() {
+  const host = statsBody.querySelector('.area-host');
+  if (!host || !_statsDaily.length) return;
+  const w = Math.max(320, Math.round(host.clientWidth));
+  host.innerHTML = areaChartSVG(_statsDaily, w);
+}
+// 窗口尺寸变化时重绘面积图，保持 1:1 清晰
+window.addEventListener('resize', () => {
+  if (!statsOverlay.hidden) renderAreaAtRealWidth();
+});
 
 $('#stats-btn').addEventListener('click', openStats);
 $('#stats-close').addEventListener('click', closeStats);
