@@ -180,26 +180,84 @@ function decodeProjectPath(encoded) {
   return encoded;
 }
 
-// ---- 预计花费（USD）：Anthropic 官方单价（每 1M token）----
+// ---- 预计花费（USD）：Anthropic 官方单价（每 1M token，2026-10 核对）----
+// 按前缀匹配，长前缀必须排在前面。未计入 Fast mode 溢价、Haiku 5.5 超 100K 提示的阶梯价。
+const OPUS_4X = { in: 5, out: 25, cr: 0.5 };
+const FABLE = { in: 10, out: 50, cr: 1 };
+const FABLE_51 = { in: 10, out: 50, cr: 0.25 };
+const SONNET_5 = { in: 2, out: 10, cr: 0.2 };
 const PRICING = {
-  opus: { in: 15, out: 75, cw: 18.75, cr: 1.5 },
-  sonnet: { in: 3, out: 15, cw: 3.75, cr: 0.3 },
-  haiku: { in: 1, out: 5, cw: 1.25, cr: 0.1 },
+  'claude-fable-5-1': FABLE_51,
+  'claude-mythos-5-1': FABLE_51,
+  'claude-fable': FABLE,
+  'claude-mythos': FABLE,
+  'claude-opus-5-5': { in: 4, out: 20, cr: 0.2 },
+  'claude-opus-5': OPUS_4X,
+  'claude-opus-4-8': OPUS_4X,
+  'claude-opus-4-7': OPUS_4X,
+  'claude-opus-4-6': OPUS_4X,
+  'claude-opus-4-5': OPUS_4X,
+  'claude-opus-4': { in: 15, out: 75, cr: 1.5 },
+  'claude-sonnet-5-5': SONNET_5,
+  'claude-sonnet-5': SONNET_5,
+  'claude-sonnet-4': { in: 3, out: 15, cr: 0.3 },
+  'claude-haiku-5-5': { in: 0.1, out: 0.5, cr: 0.01 },
+  'claude-haiku-4-5': { in: 1, out: 5, cr: 0.1 },
 };
 function priceFor(model) {
   const m = (model || '').toLowerCase();
-  if (m.includes('opus')) return PRICING.opus;
-  if (m.includes('sonnet')) return PRICING.sonnet;
-  if (m.includes('haiku')) return PRICING.haiku;
-  return PRICING.opus; // 未知模型按 opus 估（占比最大）
+  const key = Object.keys(PRICING).find(k => m.startsWith(k));
+  if (key) return PRICING[key];
+  // 未知模型按同系列当前版本估
+  if (m.includes('haiku')) return PRICING['claude-haiku-5-5'];
+  if (m.includes('sonnet')) return PRICING['claude-sonnet-5-5'];
+  return PRICING['claude-opus-5-5'];
 }
-// t: { totalInputUncached, totalCacheCreation, totalCacheRead, totalOutput }
-function estimateCostUSD(t, model) {
+// u: API 返回的 usage；缓存写按 TTL 计价（5 分钟 1.25x、1 小时 2x 输入价）
+function usageCostUSD(u, model) {
   const p = priceFor(model);
-  return ((t.totalInputUncached || 0) * p.in
-    + (t.totalCacheCreation || 0) * p.cw
-    + (t.totalCacheRead || 0) * p.cr
-    + (t.totalOutput || 0) * p.out) / 1e6;
+  const write = u.cache_creation_input_tokens || 0;
+  const write1h = Math.min(write, (u.cache_creation && u.cache_creation.ephemeral_1h_input_tokens) || 0);
+  return {
+    inputUncached: (u.input_tokens || 0) * p.in / 1e6,
+    cacheCreation: ((write - write1h) * 1.25 + write1h * 2) * p.in / 1e6,
+    cacheRead: (u.cache_read_input_tokens || 0) * p.cr / 1e6,
+    output: (u.output_tokens || 0) * p.out / 1e6,
+  };
+}
+function localDay(iso) {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// 一行消息里的全部图片（含嵌在 tool_result 里的），顺序即图片接口里的序号
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+function lineImages(content) {
+  if (!Array.isArray(content)) return [];
+  const isImage = b => b && b.type === 'image' && b.source && b.source.type === 'base64'
+    && IMAGE_TYPES.has(b.source.media_type) && typeof b.source.data === 'string';
+  const out = [];
+  for (const b of content) {
+    if (isImage(b)) out.push(b);
+    else if (b && b.type === 'tool_result' && Array.isArray(b.content)) out.push(...b.content.filter(isImage));
+  }
+  return out;
+}
+
+// 从工具结果取实际改动：Edit/Write 的 structuredPatch、Bash 的 bashEditDiff
+function extractPatch(r) {
+  if (!r || typeof r !== 'object') return null;
+  if (r.bashEditDiff && Array.isArray(r.bashEditDiff.files)) {
+    const files = r.bashEditDiff.files.map(f => ({ file: f.filePath, hunks: f.hunks || [] }));
+    for (const file of r.bashEditDiff.changedFiles || []) {
+      if (!files.some(f => f.file === file)) files.push({ file, hunks: [] });
+    }
+    return files.length ? files : null;
+  }
+  if (r.filePath && Array.isArray(r.structuredPatch)) {
+    return [{ file: r.filePath, hunks: r.structuredPatch }];
+  }
+  return null;
 }
 
 function extractTextFromContent(content) {
@@ -268,6 +326,9 @@ async function parseSessionFile(filePath, projectPath) {
   let totalInputUncached = 0;
   let lastContextSize = 0;  // 末次 assistant 的 input + cache_creation + cache_read
   let lastModel = null;
+  let aiTitle = '';         // Claude Code 自动生成的标题，会更新，取最后一条
+  // 同一条回复按内容块拆成多行、每行带相同 usage，按 message.id 去重后才能累加
+  const usageByMessage = new Map();
 
   const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -283,7 +344,9 @@ async function parseSessionFile(filePath, projectPath) {
       if (!endTime || ts > endTime) endTime = ts;
     }
 
-    if (obj.type === 'user' && obj.message) {
+    if (obj.type === 'ai-title' && obj.aiTitle) {
+      aiTitle = obj.aiTitle;
+    } else if (obj.type === 'user' && obj.message) {
       if (obj.isMeta) continue; // 系统注入的 meta 消息，整体跳过
       const content = obj.message.content;
       if (isRealUserMessage(content)) {
@@ -305,19 +368,52 @@ async function parseSessionFile(filePath, projectPath) {
       }
       const u = obj.message.usage;
       if (u && typeof u === 'object') {
-        const inp = u.input_tokens || 0;
-        const out = u.output_tokens || 0;
-        const cr = u.cache_read_input_tokens || 0;
-        const cc = u.cache_creation_input_tokens || 0;
-        totalInputUncached += inp;
-        totalCacheRead += cr;
-        totalCacheCreation += cc;
-        totalInput += inp + cr + cc;
-        totalOutput += out;
-        const ctx = inp + cr + cc;
+        usageByMessage.set(obj.message.id || obj.uuid, { u, model: obj.message.model, ts });
+        const ctx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
         if (ctx > 0) lastContextSize = ctx;
       }
       if (obj.message.model) lastModel = obj.message.model;
+    }
+  }
+
+  if (aiTitle) searchChunks.push(aiTitle);
+
+  let estimatedCostUSD = 0;
+  const usageByModel = {};  // model -> token 组成 + 各类花费，供全局统计汇总
+  const usageByDay = {};    // 本地日期 -> { totalInput, totalOutput }
+  for (const { u, model, ts } of usageByMessage.values()) {
+    const inp = u.input_tokens || 0;
+    const out = u.output_tokens || 0;
+    const cr = u.cache_read_input_tokens || 0;
+    const cc = u.cache_creation_input_tokens || 0;
+    if (!inp && !out && !cr && !cc) continue;
+    totalInputUncached += inp;
+    totalCacheRead += cr;
+    totalCacheCreation += cc;
+    totalInput += inp + cr + cc;
+    totalOutput += out;
+
+    const name = model || '(unknown)';
+    const mg = usageByModel[name] || (usageByModel[name] = {
+      input: 0, inputUncached: 0, cacheRead: 0, cacheCreation: 0, output: 0,
+      cost: { inputUncached: 0, cacheCreation: 0, cacheRead: 0, output: 0 },
+    });
+    mg.input += inp + cr + cc;
+    mg.inputUncached += inp;
+    mg.cacheRead += cr;
+    mg.cacheCreation += cc;
+    mg.output += out;
+    const cost = usageCostUSD(u, model);
+    for (const k of Object.keys(cost)) {
+      mg.cost[k] += cost[k];
+      estimatedCostUSD += cost[k];
+    }
+
+    if (ts) {
+      const day = localDay(ts);
+      const dg = usageByDay[day] || (usageByDay[day] = { totalInput: 0, totalOutput: 0 });
+      dg.totalInput += inp + cr + cc;
+      dg.totalOutput += out;
     }
   }
 
@@ -330,6 +426,7 @@ async function parseSessionFile(filePath, projectPath) {
       userMessageCount,
       assistantMessageCount,
       titlePreview: firstUserText || '(无用户消息)',
+      aiTitle,
       tokens: {
         totalInput,
         totalOutput,
@@ -339,10 +436,12 @@ async function parseSessionFile(filePath, projectPath) {
         lastContextSize,
         model: lastModel,
       },
-      estimatedCostUSD: estimateCostUSD({ totalInputUncached, totalCacheCreation, totalCacheRead, totalOutput }, lastModel),
+      estimatedCostUSD,
     },
     searchText: searchChunks.join('\n').toLowerCase(),
     filePath,
+    usageByModel,
+    usageByDay,
   };
 }
 
@@ -376,22 +475,28 @@ async function buildIndex() {
   console.log(`索引完成：${total} 个会话，${projectDirs.length} 个项目`);
 }
 
-async function readSessionMessages(filePath) {
+// agentId：读取的是子 Agent 文件。此时首条消息是任务描述（可能标了 isMeta）要保留，整个文件也不再按 sidechain 分组
+async function readSessionMessages(filePath, sessionId, agentId = '') {
   const messages = [];
+  const timelineByMessage = new Map(); // message.id -> 上下文曲线的一个点（同一回复多行只算一次）
   const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
   let sidechainFlag = false;
   const push = (msg) => { messages.push({ ...msg, sidechain: sidechainFlag }); };
+  const imageSrc = (uuid, i) => `/api/sessions/${sessionId}/images/${uuid}/${i}${agentId ? `?agent=${agentId}` : ''}`;
+  let isFirstLine = true;
 
   for await (const line of rl) {
     if (!line.trim()) continue;
     let obj;
     try { obj = JSON.parse(line); } catch { continue; }
-    sidechainFlag = !!obj.isSidechain;
+    sidechainFlag = !agentId && !!obj.isSidechain;
+    const keepMeta = !!agentId && isFirstLine;
+    isFirstLine = false;
 
     if (obj.type === 'user' && obj.message) {
-      if (obj.isMeta) continue; // 系统注入的 meta 消息，跳过
+      if (obj.isMeta && !keepMeta) continue; // 系统注入的 meta 消息，跳过
       const content = obj.message.content;
       if (typeof content === 'string') {
         const c = classifyUserText(content);
@@ -423,21 +528,30 @@ async function readSessionMessages(filePath) {
         });
       } else if (Array.isArray(content)) {
         const blocks = [];
+        const images = lineImages(content);
         for (const b of content) {
           if (!b) continue;
           if (b.type === 'text' && b.text) {
             blocks.push({ type: 'text', text: b.text });
+          } else if (images.includes(b)) {
+            blocks.push({ type: 'image', src: imageSrc(obj.uuid, images.indexOf(b)) });
           } else if (b.type === 'tool_result') {
             const resContent = typeof b.content === 'string'
               ? b.content
               : Array.isArray(b.content)
                 ? b.content.filter(x => x && x.type === 'text').map(x => x.text).join('\n')
                 : JSON.stringify(b.content);
+            const tur = obj.toolUseResult;
             blocks.push({
               type: 'tool_result',
               tool_use_id: b.tool_use_id,
               is_error: !!b.is_error,
               text: resContent,
+              images: Array.isArray(b.content)
+                ? b.content.filter(x => images.includes(x)).map(x => imageSrc(obj.uuid, images.indexOf(x)))
+                : [],
+              patch: extractPatch(tur),
+              agentId: (tur && typeof tur === 'object' && tur.agentId) || '',
             });
           }
         }
@@ -453,6 +567,22 @@ async function readSessionMessages(filePath) {
       }
     } else if (obj.type === 'assistant' && obj.message) {
       const content = obj.message.content;
+      const usage = obj.message.usage;
+      if (usage && typeof usage === 'object') {
+        const key = obj.message.id || obj.uuid;
+        const ctx = (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0);
+        const prev = timelineByMessage.get(key);
+        if (ctx > 0) {
+          timelineByMessage.set(key, {
+            messageIndex: prev ? prev.messageIndex : messages.length, // 曲线点击时定位到这条消息
+            timestamp: obj.timestamp,
+            model: obj.message.model,
+            context: ctx,
+            output: usage.output_tokens || 0,
+            costUSD: Object.values(usageCostUSD(usage, obj.message.model)).reduce((s, v) => s + v, 0),
+          });
+        }
+      }
       if (!Array.isArray(content)) continue;
       const blocks = [];
       for (const b of content) {
@@ -489,7 +619,42 @@ async function readSessionMessages(filePath) {
       }
     }
   }
-  return messages;
+  return { messages, timeline: Array.from(timelineByMessage.values()) };
+}
+
+// ---------- 子 Agent：<会话文件同名目录>/subagents/agent-<id>.jsonl ----------
+function agentsDir(entry) {
+  return path.join(path.dirname(entry.filePath), entry.meta.sessionId, 'subagents');
+}
+
+function listAgents(entry) {
+  const dir = agentsDir(entry);
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .filter(f => /^agent-.+\.jsonl$/.test(f))
+    .map(f => {
+      const agentId = f.slice('agent-'.length, -'.jsonl'.length);
+      const meta = readJsonOr(path.join(dir, `agent-${agentId}.meta.json`), {});
+      const skill = readJsonOr(path.join(dir, `agent-${agentId}.forked-skill.json`), {});
+      return {
+        agentId,
+        agentType: meta.agentType || '',
+        description: meta.description || '',
+        name: meta.name || '',
+        skillName: skill.skillName || '',
+        finished: meta.finished !== false,
+        toolUseId: meta.toolUseId || '',
+        updatedAt: fs.statSync(path.join(dir, f)).mtimeMs,
+      };
+    })
+    .sort((a, b) => a.updatedAt - b.updatedAt);
+}
+
+// agentId 来自 URL，只接受合法字符，防止路径穿越；返回 null 表示不存在
+function agentFilePath(entry, agentId) {
+  if (!/^[\w-]+$/.test(agentId)) return null;
+  const file = path.join(agentsDir(entry), `agent-${agentId}.jsonl`);
+  return fs.existsSync(file) ? file : null;
 }
 
 // ---------- HTTP ----------
@@ -542,11 +707,55 @@ app.get('/api/sessions/:id', async (req, res) => {
   const entry = sessionIndex.get(req.params.id);
   if (!entry) return res.status(404).json({ error: 'not found' });
   try {
-    const messages = await readSessionMessages(entry.filePath);
-    res.json({ meta: metaWithName(entry.meta), messages });
+    const { messages, timeline } = await readSessionMessages(entry.filePath, req.params.id);
+    res.json({ meta: metaWithName(entry.meta), messages, timeline, agents: listAgents(entry) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+app.get('/api/sessions/:id/agents/:agentId', async (req, res) => {
+  const entry = sessionIndex.get(req.params.id);
+  const file = entry && agentFilePath(entry, req.params.agentId);
+  if (!file) return res.status(404).json({ error: 'not found' });
+  try {
+    const { messages } = await readSessionMessages(file, req.params.id, req.params.agentId);
+    res.json({ messages });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 图片以 base64 存在 jsonl 里，总量可达上百 MB，不随消息返回，按需从文件取
+app.get('/api/sessions/:id/images/:uuid/:index', async (req, res) => {
+  const entry = sessionIndex.get(req.params.id);
+  if (!entry) return res.status(404).end();
+  const file = req.query.agent ? agentFilePath(entry, String(req.query.agent)) : entry.filePath;
+  if (!file) return res.status(404).end();
+  const stream = fs.createReadStream(file, { encoding: 'utf8' });
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  let image = null;
+  try {
+    for await (const line of rl) {
+      if (!line.includes(req.params.uuid)) continue;
+      let obj;
+      try { obj = JSON.parse(line); } catch { continue; }
+      if (obj.uuid !== req.params.uuid) continue;
+      image = lineImages(obj.message && obj.message.content)[Number(req.params.index)];
+      break;
+    }
+  } catch (e) {
+    return res.status(500).end();
+  } finally {
+    stream.destroy();
+  }
+  if (!image) return res.status(404).end();
+  res.set({
+    'Content-Type': image.source.media_type,
+    'Cache-Control': 'private, max-age=86400', // 内容由 uuid 唯一确定，可以缓存
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.send(Buffer.from(image.source.data, 'base64'));
 });
 
 app.post('/api/refresh', async (req, res) => {
@@ -606,7 +815,7 @@ async function handleFileEvent(eventType, filePath) {
       sessionIndex.set(sessionId, entry);
       sseBroadcast('session-updated', {
         sessionId,
-        meta: { ...entry.meta, customName: sessionNames[sessionId] || '' },
+        meta: metaWithName(entry.meta),
       });
     } catch (e) {
       console.warn('解析失败 (watcher):', filePath, e.message);
@@ -635,6 +844,7 @@ app.get('/api/config', (req, res) => {
   res.json({
     claudeDir: CONFIG.claudeDir,
     port: CONFIG.port,
+    homeDir: os.homedir(),
     projectsDir: PROJECTS_DIR,
     projectsDirExists: fs.existsSync(PROJECTS_DIR),
   });
@@ -656,6 +866,10 @@ app.delete('/api/sessions/:id', (req, res) => {
   }
   if (pinnedSet.delete(id)) { try { savePinned(); } catch {} }
   if (favoriteSet.delete(id)) { try { saveFavorite(); } catch {} }
+  if (tagAssignments[id]) {
+    delete tagAssignments[id];
+    try { saveTags(); } catch (e) { console.warn('清理标签绑定失败:', e.message); }
+  }
   res.json({ ok: true, sessionId: id, deletedFile: entry.filePath });
 });
 
@@ -674,7 +888,8 @@ app.get('/api/stats', (req, res) => {
   // 按项目 / 按日 / 按模型
   const byProject = new Map();   // projectPath -> { count, totalInput, totalOutput, latest }
   const byDay = new Map();        // YYYY-MM-DD -> { count, totalInput, totalOutput }
-  const byModel = new Map();      // model -> { count, input, inputUncached, cacheRead, cacheCreation, output }
+  const byModel = new Map();      // model -> { count, input, inputUncached, cacheRead, cacheCreation, output, costUSD }
+  const costBreakdown = { inputUncached: 0, cacheCreation: 0, cacheRead: 0, output: 0 };  // 4 类 token 各自的美元
 
   for (const e of entries) {
     const m = e.meta;
@@ -697,56 +912,47 @@ app.get('/api/stats', (req, res) => {
     pg.totalOutput += t.totalOutput || 0;
     if (m.endTime && (!pg.latest || m.endTime > pg.latest)) pg.latest = m.endTime;
 
-    // by day（按 endTime 的日期）
-    if (m.endTime) {
-      const d = m.endTime.slice(0, 10);
-      if (!byDay.has(d)) byDay.set(d, { day: d, count: 0, totalInput: 0, totalOutput: 0 });
-      const dg = byDay.get(d);
+    // by day（按消息时间的本地日期）：count = 当天活跃的会话数
+    for (const [day, u] of Object.entries(e.usageByDay)) {
+      if (!byDay.has(day)) byDay.set(day, { day, count: 0, totalInput: 0, totalOutput: 0 });
+      const dg = byDay.get(day);
       dg.count++;
-      dg.totalInput += t.totalInput || 0;
-      dg.totalOutput += t.totalOutput || 0;
+      dg.totalInput += u.totalInput;
+      dg.totalOutput += u.totalOutput;
     }
 
-    // by model（累计各 token 组成，用于成本估算）
-    const model = t.model || '(unknown)';
-    if (!byModel.has(model)) byModel.set(model, { model, count: 0, input: 0, inputUncached: 0, cacheRead: 0, cacheCreation: 0, output: 0 });
-    const mg = byModel.get(model);
-    mg.count++;
-    mg.input += t.totalInput || 0;
-    mg.inputUncached += t.totalInputUncached || 0;
-    mg.cacheRead += t.totalCacheRead || 0;
-    mg.cacheCreation += t.totalCacheCreation || 0;
-    mg.output += t.totalOutput || 0;
+    // by model（按每条消息实际使用的模型累计）：count = 用过该模型的会话数
+    for (const [model, u] of Object.entries(e.usageByModel)) {
+      if (!byModel.has(model)) byModel.set(model, { model, count: 0, input: 0, inputUncached: 0, cacheRead: 0, cacheCreation: 0, output: 0, costUSD: 0 });
+      const mg = byModel.get(model);
+      mg.count++;
+      mg.input += u.input;
+      mg.inputUncached += u.inputUncached;
+      mg.cacheRead += u.cacheRead;
+      mg.cacheCreation += u.cacheCreation;
+      mg.output += u.output;
+      for (const k of Object.keys(costBreakdown)) {
+        mg.costUSD += u.cost[k];
+        costBreakdown[k] += u.cost[k];
+      }
+    }
   }
 
-  // ---- 预计花费（USD）：按模型 token 组成 × Anthropic 官方单价（模块级 PRICING/priceFor）----
-  // 花费构成（4 类 token 各自的美元）——按各模型单价分别累计后求和
-  const costBreakdown = { inputUncached: 0, cacheCreation: 0, cacheRead: 0, output: 0 };
-  const byModelArr = Array.from(byModel.values()).map(mg => {
-    const p = priceFor(mg.model);
-    const cIn = mg.inputUncached * p.in / 1e6;
-    const cCw = mg.cacheCreation * p.cw / 1e6;
-    const cCr = mg.cacheRead * p.cr / 1e6;
-    const cOut = mg.output * p.out / 1e6;
-    costBreakdown.inputUncached += cIn;
-    costBreakdown.cacheCreation += cCw;
-    costBreakdown.cacheRead += cCr;
-    costBreakdown.output += cOut;
-    return { ...mg, costUSD: cIn + cCw + cCr + cOut };
-  }).sort((a, b) => b.costUSD - a.costUSD);
+  const byModelArr = Array.from(byModel.values()).sort((a, b) => b.costUSD - a.costUSD);
   const estimatedCostUSD = byModelArr.reduce((s, m) => s + m.costUSD, 0);
 
   // Top 项目（按 totalInput 排）
   const topProjects = Array.from(byProject.values())
     .sort((a, b) => b.totalInput - a.totalInput);
 
-  // 按 totalInput 排 Top 会话
+  // 按花费排 Top 会话
   const topSessions = entries.map(e => {
     const m = e.meta;
     const t = m.tokens || {};
     return {
       sessionId: m.sessionId,
       customName: sessionNames[m.sessionId] || '',
+      aiTitle: m.aiTitle,
       titlePreview: m.titlePreview,
       projectPath: m.projectPath,
       endTime: m.endTime,
@@ -754,7 +960,7 @@ app.get('/api/stats', (req, res) => {
       totalOutput: t.totalOutput || 0,
       estimatedCostUSD: m.estimatedCostUSD || 0,
     };
-  }).sort((a, b) => b.totalInput - a.totalInput).slice(0, 20);
+  }).sort((a, b) => b.estimatedCostUSD - a.estimatedCostUSD).slice(0, 20);
 
   // 按日序倒序
   const daily = Array.from(byDay.values()).sort((a, b) => a.day.localeCompare(b.day));
@@ -939,33 +1145,44 @@ function killPortOccupant(port) {
         `for /f "tokens=5" %a in ('netstat -ano ^| findstr :${port} ^| findstr LISTENING') do taskkill /PID %a /F`
       ], () => resolve());
     } else {
-      // macOS / Linux：lsof + kill -9
-      execFile('sh', ['-c', `lsof -ti :${port} | xargs -r kill -9`], () => resolve());
+      // macOS / Linux：只匹配监听者，否则连着该端口的浏览器也会被杀
+      execFile('sh', ['-c', `lsof -ti tcp:${port} -sTCP:LISTEN | xargs -r kill -9`], () => resolve());
     }
   });
 }
 
 function listenOnce(app, port) {
   return new Promise((resolve, reject) => {
-    const srv = app.listen(port);
+    const srv = app.listen(port, '127.0.0.1'); // 仅本机可访问：接口无鉴权，且能读取和删除会话
     srv.once('listening', () => resolve(srv));
     srv.once('error', reject);
   });
 }
 
-async function listenWithKillFallback(app, port) {
+// 探测端口上是否是 claude-web 自身的旧实例
+async function isOwnInstance(port) {
   try {
-    const srv = await listenOnce(app, port);
-    return { server: srv, port };
-  } catch (err) {
-    if (err.code !== 'EADDRINUSE') throw err;
-    console.log(`端口 ${port} 被占用，正在关闭占用进程...`);
+    const res = await fetch(`http://127.0.0.1:${port}/api/config`, { signal: AbortSignal.timeout(1500) });
+    const data = await res.json();
+    return !!(data && data.claudeDir && data.projectsDir);
+  } catch {
+    return false;
+  }
+}
+
+async function listenWithRestart(app, port) {
+  // 先探测再监听：旧版本监听所有网卡时，新实例绑 127.0.0.1 不一定报端口冲突，旧实例会继续对外暴露
+  if (await isOwnInstance(port)) {
+    console.log(`端口 ${port} 上已有 claude-web，正在重启...`);
     await killPortOccupant(port);
     // 给系统几百毫秒释放端口
     await new Promise(r => setTimeout(r, 800));
-    const srv = await listenOnce(app, port);
-    console.log(`已重新占用端口 ${port}`);
-    return { server: srv, port };
+  }
+  try {
+    return { server: await listenOnce(app, port), port };
+  } catch (err) {
+    if (err.code !== 'EADDRINUSE') throw err;
+    throw new Error(`端口 ${port} 被其他程序占用，请用 --port 换一个端口`);
   }
 }
 
@@ -980,7 +1197,7 @@ async function listenWithKillFallback(app, port) {
 
 选项:
   --no-open          启动后不自动打开浏览器
-  --port <number>    指定端口（默认 ${DEFAULT_PORT}，被占用时自动杀进程重启）
+  --port <number>    指定端口（默认 ${DEFAULT_PORT}；已有 claude-web 实例时自动重启它，被其他程序占用则报错退出）
   -h, --help         显示帮助
 
 环境变量:
@@ -1012,7 +1229,7 @@ async function listenWithKillFallback(app, port) {
   await buildIndex();
   startWatcher();
   try {
-    const { port } = await listenWithKillFallback(app, CONFIG.port || DEFAULT_PORT);
+    const { port } = await listenWithRestart(app, CONFIG.port || DEFAULT_PORT);
     const url = `http://localhost:${port}`;
     console.log(`\n✓ 服务已启动: ${url}`);
     if (!fs.existsSync(PROJECTS_DIR)) {

@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <link rel="icon" href="data:," />
   <link rel="stylesheet" href="style.css" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css" />
+  <link rel="stylesheet" id="hljs-theme" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css" />
 </head>
 <body>
   <div id="app">
@@ -46,7 +46,38 @@
       <div class="empty" id="empty-tip">← 选择左侧会话查看内容</div>
       <div id="detail-content" class="detail-content" hidden>
         <header class="detail-header" id="detail-header"></header>
-        <div id="messages" class="messages"></div>
+        <div class="detail-toolbar">
+          <div class="view-modes" id="view-modes" role="group" aria-label="显示内容">
+            <button class="view-mode" data-mode="chat" title="只看你和 Claude 的文字">只看对话</button>
+            <button class="view-mode" data-mode="default" title="文字、思考过程、文件改动和子 Agent">常规</button>
+            <button class="view-mode" data-mode="tools" title="显示全部工具调用及其结果">全部工具</button>
+            <button class="view-mode" data-mode="errors" title="只看执行失败的工具调用">只看错误</button>
+          </div>
+          <div class="msg-search">
+            <input id="msg-search" type="text" placeholder="在本会话中搜索（⌘F）" spellcheck="false" autocomplete="off" />
+            <span class="msg-search-count" id="msg-search-count"></span>
+            <button class="msg-search-hint" id="msg-search-hint" hidden></button>
+            <button class="tb-icon" id="msg-search-prev" title="上一条（Shift+Enter）" aria-label="上一条">↑</button>
+            <button class="tb-icon" id="msg-search-next" title="下一条（Enter）" aria-label="下一条">↓</button>
+          </div>
+          <div class="tb-panels">
+            <button class="tb-btn" id="toggle-context">上下文曲线</button>
+            <button class="tb-btn" id="toggle-files">改动文件 <b id="files-count">0</b></button>
+            <button class="tb-btn" id="toggle-agents">子 Agent <b id="agents-count">0</b></button>
+          </div>
+        </div>
+        <div class="context-panel" id="context-panel" hidden></div>
+        <div class="detail-main">
+          <div id="messages" class="messages"></div>
+          <aside class="side-drawer" id="side-drawer" hidden>
+            <div class="drawer-head">
+              <button class="tb-icon" id="drawer-back" title="返回列表" aria-label="返回列表" hidden>←</button>
+              <span class="drawer-title" id="drawer-title"></span>
+              <button class="tb-icon" id="drawer-close" title="关闭" aria-label="关闭">×</button>
+            </div>
+            <div class="drawer-body" id="drawer-body"></div>
+          </aside>
+        </div>
       </div>
     </main>
   </div>
@@ -91,11 +122,30 @@
       </div>
     </div>
   </div>
+  <div id="dialog-modal" class="modal dialog-modal" hidden>
+    <div class="modal-backdrop"></div>
+    <div class="modal-dialog">
+      <div class="modal-header" id="dialog-title"></div>
+      <div class="modal-body">
+        <div class="dialog-message" id="dialog-message"></div>
+        <input id="dialog-input" type="text" spellcheck="false" autocomplete="off" hidden />
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="dialog-cancel">取消</button>
+        <button class="btn btn-primary" id="dialog-ok">确定</button>
+      </div>
+    </div>
+  </div>
+  <div id="image-viewer" class="image-viewer" role="dialog" aria-modal="true" aria-label="查看图片" hidden>
+    <button class="image-viewer-close" id="image-viewer-close" aria-label="关闭" title="关闭（Esc）">×</button>
+    <img id="image-viewer-img" alt="消息中的图片" />
+    <div class="image-viewer-info" id="image-viewer-info"></div>
+  </div>
   <div class="topbar" id="topbar">
     <select id="theme-select" class="topbar-select" title="切换主题">
       <option value="dark">🌙 暗色</option>
-      <option value="mid">🌗 中色</option>
       <option value="light">☀️ 亮色</option>
+      <option value="blue">🔵 蓝色</option>
     </select>
     <span class="topbar-divider"></span>
     <button class="topbar-btn" id="stats-btn" title="全局统计">📊</button>
@@ -106,6 +156,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/highlight.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/diff@5.2.0/dist/diff.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

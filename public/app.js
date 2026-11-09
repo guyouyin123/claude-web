@@ -22,6 +22,7 @@ function saveIdSet(key, set) {
 const LS_TIME_RANGE = 'cv.timeRange';
 const LS_TIME_FROM = 'cv.timeFrom';
 const LS_TIME_TO = 'cv.timeTo';
+const LS_VIEW_MODE = 'cv.messageView'; // 默认模式改为只看对话时换了键名，旧键 cv.viewMode 里的选择不再生效
 const state = {
   allSessions: [],     // 服务端返回的原始顺序（按时间倒序）
   sessions: [],        // 经过筛选 + 置顶排序后的展示列表
@@ -36,6 +37,11 @@ const state = {
   timeTo: localStorage.getItem(LS_TIME_TO) || '',
   tagLibrary: [],          // [{id, name, color}]
   selectedTagFilter: new Set(loadIdSet('cv.tagFilter')),
+  viewMode: localStorage.getItem(LS_VIEW_MODE) || 'chat', // 'chat' | 'default' | 'tools' | 'errors'
+  showContext: localStorage.getItem('cv.showContext') === '1',
+  search: { query: '', hits: [], current: -1 },               // 会话内搜索；hits 是展示列表的下标
+  drawer: null,            // null | { kind: 'files' | 'agents' | 'agent', agentId? }
+  openFiles: new Set(),    // 改动文件面板里已展开的文件
 };
 
 function tagById(id) {
@@ -119,8 +125,10 @@ function fmtTime(iso) {
 
 function shortProject(p) {
   if (!p) return '';
-  const home = '/Users/jeff';
-  if (p.startsWith(home)) p = '~' + p.slice(home.length);
+  const home = state.homeDir;
+  if (home && p.startsWith(home) && (p.length === home.length || /[\\/]/.test(p[home.length]))) {
+    p = '~' + p.slice(home.length);
+  }
   return p;
 }
 
@@ -131,23 +139,13 @@ function fmtTokens(n) {
   return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
 }
 
-// Claude 4.x 系列默认 200k 上下文窗口
-const MODEL_CONTEXT_WINDOWS = {
-  'claude-opus-4-7': 200000,
-  'claude-opus-4-6': 200000,
-  'claude-opus-4-5': 200000,
-  'claude-sonnet-4-6': 200000,
-  'claude-sonnet-4-5': 200000,
-  'claude-haiku-4-5': 200000,
-};
-const DEFAULT_CONTEXT_WINDOW = 200000;
+// 上下文窗口（2026-10 核对）；模型 id 可能带日期后缀，只取前缀匹配。未知模型返回 0，界面不显示占比
+const CONTEXT_1M = /^claude-(fable|mythos|opus-5|opus-4-[678]|sonnet-5|sonnet-4-6|haiku-5)/;
+const CONTEXT_200K = /^claude-(opus-4|sonnet-4|haiku-4|3)/;
 function contextWindowFor(model) {
-  if (!model) return DEFAULT_CONTEXT_WINDOW;
-  // 模型 id 形如 claude-opus-4-7-20251201；只取前缀匹配
-  for (const key of Object.keys(MODEL_CONTEXT_WINDOWS)) {
-    if (model.startsWith(key)) return MODEL_CONTEXT_WINDOWS[key];
-  }
-  return DEFAULT_CONTEXT_WINDOW;
+  if (CONTEXT_1M.test(model || '')) return 1000000;
+  if (CONTEXT_200K.test(model || '')) return 200000;
+  return 0;
 }
 
 async function loadSessions(q = '') {
@@ -239,8 +237,9 @@ function createSessionItem(s) {
   if (isFav) cls.push('is-favorite');
   item.className = cls.join(' ');
   item.dataset.id = s.sessionId;
-  const nameLine = s.customName
-    ? `<div class="session-name">${highlight(s.customName, state.query)}</div>`
+  const title = s.customName || s.aiTitle;
+  const nameLine = title
+    ? `<div class="session-name">${highlight(title, state.query)}</div>`
     : '';
   const tagChips = (s.tags || []).map(tid => {
     const t = tagById(tid); if (!t) return '';
@@ -256,10 +255,10 @@ function createSessionItem(s) {
     tokenLine = `
       <div class="session-tokens">
         <span title="累计输入 / 输出">累计 ${fmtTokens(t.totalInput)}↑ ${fmtTokens(t.totalOutput)}↓</span>
-        <span class="ctx-bar" title="末次上下文 ${fmtTokens(t.lastContextSize)} / ${fmtTokens(win)}">
+        <span class="ctx-bar" title="末次上下文 ${fmtTokens(t.lastContextSize)}${win ? ' / ' + fmtTokens(win) : ''}">
           末次 ${fmtTokens(t.lastContextSize)}
-          <span class="ctx-bar-bg"><span class="ctx-bar-fill" style="width:${pct}%;"></span></span>
-          <span class="ctx-bar-pct">${pct}%</span>
+          ${win ? `<span class="ctx-bar-bg"><span class="ctx-bar-fill" style="width:${pct}%;"></span></span>
+          <span class="ctx-bar-pct">${pct}%</span>` : ''}
         </span>
       </div>
       <div class="session-cost-line" title="预计花费（按 Anthropic 官方单价估算）">
@@ -272,7 +271,7 @@ function createSessionItem(s) {
       <div class="session-actions-left">
         <button class="icon-btn pin-btn ${isPinned ? 'on' : ''}" title="${isPinned ? '取消置顶' : '置顶'}">📌</button>
         <button class="icon-btn fav-btn ${isFav ? 'on' : ''}" title="${isFav ? '取消收藏' : '收藏'}">${isFav ? '★' : '☆'}</button>
-        <button class="icon-btn session-copy-btn" title="复制 /resume 命令">复制resume命令</button>
+        <button class="icon-btn session-copy-btn" title="复制 /resume 命令">复制命令</button>
       </div>
       <div class="session-actions-right">
         <button class="icon-btn session-delete-btn" title="删除该会话（不可恢复）">删除</button>
@@ -280,7 +279,7 @@ function createSessionItem(s) {
     </div>
     ${nameLine}
     ${tagsLine}
-    <div class="session-preview">${highlight(s.titlePreview, state.query)}</div>
+    <div class="session-preview ${title ? 'has-title' : ''}">${highlight(s.titlePreview, state.query)}</div>
     <div class="session-meta">
       <span>${fmtTime(s.endTime)}</span>
       <span>${s.userMessageCount} 问 / ${s.assistantMessageCount} 答</span>
@@ -310,8 +309,14 @@ function createSessionItem(s) {
 }
 
 async function deleteSession(s) {
-  const label = s.customName || s.titlePreview.slice(0, 40);
-  if (!window.confirm(`确认删除会话？此操作不可恢复，会直接删除源文件。\n\n${label}\n${s.sessionId}`)) return;
+  const label = s.customName || s.aiTitle || s.titlePreview.slice(0, 40);
+  const ok = await askDialog({
+    title: '删除会话',
+    message: `此操作不可恢复，会直接删除源文件。\n\n${label}\n${s.sessionId}`,
+    okText: '删除',
+    danger: true,
+  });
+  if (!ok) return;
   try {
     const res = await fetch(`/api/sessions/${s.sessionId}`, { method: 'DELETE' });
     if (!res.ok) {
@@ -329,7 +334,7 @@ async function deleteSession(s) {
     }
     applyFilterAndSort();
   } catch (e) {
-    alert('删除失败: ' + e.message);
+    showError('删除失败: ' + e.message);
   }
 }
 
@@ -391,7 +396,7 @@ async function copyResumeCommand(sessionId, btn) {
     }, 1200);
   } catch (e) {
     btn.textContent = '失败';
-    setTimeout(() => { btn.textContent = '复制resume命令'; }, 1200);
+    setTimeout(() => { btn.textContent = '复制命令'; }, 1200);
   }
 }
 
@@ -475,22 +480,28 @@ async function selectSession(id) {
   detailContent.hidden = false;
   messagesEl.innerHTML = '<div style="color:#7a818c;padding:40px;text-align:center;">加载中...</div>';
   detailHeader.innerHTML = '';
+  clearMsgSearch();
+  if (state.drawer && state.drawer.kind === 'agent') state.drawer = { kind: 'agents' };
 
   try {
     const res = await fetch(`/api/sessions/${id}`);
     if (!res.ok) throw new Error('加载失败');
     const data = await res.json();
-    renderDetail(data);
+    if (state.currentId !== id) return; // 加载期间已切到别的会话
+    // 从全局搜索结果点进来：定位到第一处命中（命中的可能只是路径或标签，这时不带入）
+    renderDetail(data, () => { if (state.query) searchFromGlobal(state.query); });
   } catch (e) {
+    if (state.currentId !== id) return;
     messagesEl.innerHTML = `<div style="color:#e88078;padding:20px;">${escapeHtml(e.message)}</div>`;
   }
 }
 
-function renderDetail(data) {
-  const m = data.meta;
+function renderDetailHeader(m) {
   const nameDisplay = m.customName
     ? `<span class="h-name">${escapeHtml(m.customName)}</span>`
-    : `<span class="h-name h-name-empty">（未命名）</span>`;
+    : m.aiTitle
+      ? `<span class="h-name">${escapeHtml(m.aiTitle)}</span><span class="h-auto-title">自动标题</span>`
+      : `<span class="h-name h-name-empty">（未命名）</span>`;
   const t = m.tokens || null;
   let tokenSummary = '';
   if (t && (t.totalInput || t.totalOutput)) {
@@ -505,9 +516,9 @@ function renderDetail(data) {
         <span class="tk-chip tk-cost" title="预计花费（按 Anthropic 官方单价估算）">预计花费 <b>${fmtUSD(m.estimatedCostUSD || 0)}</b></span>
         <span class="tk-chip">缓存命中 <b>${hitRate}%</b></span>
         <span class="tk-chip ctx-chip">
-          末次上下文 <b>${fmtTokens(t.lastContextSize)}</b> / ${fmtTokens(win)}
+          末次上下文 <b>${fmtTokens(t.lastContextSize)}</b>${win ? ` / ${fmtTokens(win)}
           <span class="ctx-bar-bg ctx-bar-lg"><span class="ctx-bar-fill" style="width:${pct}%;"></span></span>
-          <b>${pct}%</b>
+          <b>${pct}%</b>` : ''}
         </span>
         ${t.model ? `<span class="tk-chip tk-model">${escapeHtml(t.model)}</span>` : ''}
       </div>
@@ -562,49 +573,99 @@ function renderDetail(data) {
     });
   });
   detailHeader.querySelector('#h-tag-manage').addEventListener('click', openTagsModal);
+}
 
-  messagesEl.innerHTML = '';
-  // 过滤规则：
-  // - 工具结果 (tool_result) 完全隐藏
-  // - assistant 消息：有文字/思考 → 显示；否则看是否含"有视觉价值"的工具（Edit/Write 等），有则显示，否则隐藏
-  const visible = data.messages.filter(m => {
-    if (HIDDEN_ROLES.has(m.role)) return false;
-    if (m.role === 'assistant') {
-      const hasContent = m.blocks.some(b => b.type === 'text' || b.type === 'thinking');
-      if (hasContent) return true;
-      const hasVisibleTool = m.blocks.some(b => b.type === 'tool_use' && VISIBLE_TOOLS.has(b.name));
-      return hasVisibleTool;
-    }
-    return true;
+// 由接口数据整理出渲染所需的上下文；子 Agent 面板用同样的结构
+function buildDetailCtx(data, showResults) {
+  const results = new Map(); // tool_use_id -> tool_result 块
+  for (const m of data.messages) {
+    for (const b of m.blocks) if (b.type === 'tool_result') results.set(b.tool_use_id, b);
+  }
+  const agents = data.agents || [];
+  const agentByTool = new Map(agents.filter(a => a.toolUseId).map(a => [a.toolUseId, a.agentId]));
+  return { raw: data.messages, meta: data.meta, timeline: data.timeline || [], agents, results, agentByTool, showResults };
+}
+
+function resultsShownIn(mode) {
+  return mode === 'tools' || mode === 'errors';
+}
+
+// 一条消息在某显示模式下要展示的块，null 表示整条隐藏。工具结果不单独成条，显示在对应的工具块内
+function viewBlocks(m, ctx, mode) {
+  if (HIDDEN_ROLES.has(m.role)) return null;
+  const keep = (pred) => {
+    const blocks = m.blocks.filter(pred);
+    return blocks.length ? blocks : null;
+  };
+  if (mode === 'errors') {
+    if (m.role === 'command_output') return m.blocks.some(b => b.isError) ? m.blocks : null;
+    if (m.role !== 'assistant') return null;
+    return keep(b => b.type === 'tool_use' && ctx.results.get(b.id)?.is_error);
+  }
+  if (m.role !== 'assistant') return mode === 'chat' && m.role === 'command_output' ? null : m.blocks;
+  if (mode === 'chat') return keep(b => b.type === 'text');
+  if (mode === 'tools') return m.blocks;
+  // 默认：有文字/思考 → 显示；否则看是否含"有视觉价值"的工具（Edit/Write、子 Agent 等）
+  const visible = m.blocks.some(b => b.type === 'text' || b.type === 'thinking'
+    || (b.type === 'tool_use' && (VISIBLE_TOOLS.has(b.name) || ctx.results.get(b.id)?.agentId || ctx.agentByTool.has(b.id))));
+  return visible ? m.blocks : null;
+}
+
+function buildView(ctx, mode) {
+  const out = [];
+  ctx.raw.forEach((m, rawIndex) => {
+    const blocks = viewBlocks(m, ctx, mode);
+    if (blocks) out.push({ ...m, blocks, rawIndex, i: out.length });
   });
+  return out;
+}
+
+function renderEmptyView(container) {
+  if (state.detail.messages.length) return;
+  const el = document.createElement('div');
+  el.className = 'view-empty';
+  el.textContent = state.viewMode === 'errors' ? '本会话没有失败的工具调用' : '当前模式下没有内容';
+  container.appendChild(el);
+}
+
+// afterLayout：滚到底之后执行，用于接着定位到搜索结果
+function renderDetail(data, afterLayout) {
+  renderDetailHeader(data.meta);
+  messagesEl.innerHTML = '';
+  const ctx = buildDetailCtx(data, resultsShownIn(state.viewMode));
+  const visible = buildView(ctx, state.viewMode);
   const start = Math.max(0, visible.length - MSG_PAGE_SIZE);
-  state.detail = { messages: visible, start };
+  state.detail = { ...ctx, messages: visible, start };
   renderInitialBatch(messagesEl);
+  renderEmptyView(messagesEl);
+  refreshPanels();
+  rerunMsgSearch();
   // 滚到底（要等浏览器布局完成）
   requestAnimationFrame(() => {
     messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (afterLayout) afterLayout();
   });
 }
 
 const MSG_PAGE_SIZE = 100;
 const HIDDEN_ROLES = new Set(['tool_result']);
 // "有视觉价值"的工具：即便消息里没有文字，也要展示这些工具调用（因为有 diff 等可视化）
-const VISIBLE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+const VISIBLE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Agent', 'Task']);
 
-function renderMessageGroup(container, slice) {
+function renderMessageGroup(container, slice, ctx = state.detail) {
   // 按 sidechain 连续分组渲染；返回首个新建节点
   const firstBefore = container.firstChild;
   let i = 0;
   while (i < slice.length) {
     const msg = slice[i];
     if (!msg.sidechain) {
-      container.appendChild(renderMessage(msg));
+      container.appendChild(renderMessage(msg, ctx));
       i++;
       continue;
     }
     let j = i;
     while (j < slice.length && slice[j].sidechain) j++;
-    container.appendChild(renderSidechainGroup(slice.slice(i, j)));
+    container.appendChild(renderSidechainGroup(slice.slice(i, j), ctx));
     i = j;
   }
   return firstBefore; // 用于"挂上方" sentinel 的参考节点
@@ -632,10 +693,11 @@ function renderInitialBatch(container) {
   highlightNewCodeBlocks(container);
 }
 
-function renderEarlierBatch(container) {
+// upTo：至少渲染到这条消息（定位时用，定位方自己负责滚动）
+function renderEarlierBatch(container, upTo) {
   const d = state.detail;
   if (!d || d.start <= 0) return;
-  const newStart = Math.max(0, d.start - MSG_PAGE_SIZE);
+  const newStart = Math.max(0, Math.min(d.start - MSG_PAGE_SIZE, upTo === undefined ? Infinity : upTo));
   const slice = d.messages.slice(newStart, d.start);
   // 记录当前滚动位置（基于第一条已渲染消息的位置）
   const anchor = container.querySelector('.msg, .sidechain-group');
@@ -651,8 +713,9 @@ function renderEarlierBatch(container) {
   d.start = newStart;
   ensureTopSentinel(container);
   highlightNewCodeBlocks(container);
+  markSearchHits();
   // 恢复滚动位置（让原 anchor 元素停在原视觉位置）
-  if (anchor) {
+  if (anchor && upTo === undefined) {
     requestAnimationFrame(() => {
       const newTop = anchor.getBoundingClientRect().top;
       container.scrollTop += (newTop - anchorTop);
@@ -677,7 +740,7 @@ const msgObserver = new IntersectionObserver((entries) => {
   }
 }, { root: messagesEl, rootMargin: '300px' });
 
-function renderSidechainGroup(segment) {
+function renderSidechainGroup(segment, ctx) {
   const wrap = document.createElement('div');
   wrap.className = 'sidechain-group';
   const userCount = segment.filter(m => m.role === 'user').length;
@@ -694,7 +757,7 @@ function renderSidechainGroup(segment) {
   `;
   const body = document.createElement('div');
   body.className = 'sidechain-body';
-  for (const m of segment) body.appendChild(renderMessage(m));
+  for (const m of segment) body.appendChild(renderMessage(m, ctx));
   header.addEventListener('click', () => wrap.classList.toggle('open'));
   wrap.appendChild(header);
   wrap.appendChild(body);
@@ -702,7 +765,7 @@ function renderSidechainGroup(segment) {
 }
 
 async function promptRename(sessionId, current) {
-  const input = window.prompt('输入会话名称（留空则清除）:', current);
+  const input = await askDialog({ title: '重命名会话', message: '输入会话名称（留空则清除）', input: current });
   if (input === null) return; // 取消
   const name = input.trim();
   try {
@@ -721,31 +784,19 @@ async function promptRename(sessionId, current) {
       if (s.sessionId === sessionId) s.customName = data.customName;
     }
     applyFilterAndSort();
-    // 重新渲染详情页头部
-    const cur = state.allSessions.find(s => s.sessionId === sessionId);
-    if (cur) {
-      const headerName = detailHeader.querySelector('.h-name');
-      if (headerName) {
-        if (cur.customName) {
-          headerName.classList.remove('h-name-empty');
-          headerName.textContent = cur.customName;
-        } else {
-          headerName.classList.add('h-name-empty');
-          headerName.textContent = '（未命名）';
-        }
-      }
-    }
+    if (state.currentId === sessionId) refreshCurrentDetail();
   } catch (e) {
-    alert('重命名失败: ' + e.message);
+    showError('重命名失败: ' + e.message);
   }
 }
 
-function renderMessage(msg) {
+function renderMessage(msg, ctx = state.detail) {
   const wrap = document.createElement('div');
   const cssRole = msg.role === 'tool_result' ? 'tool-result'
                  : msg.role === 'command_output' ? 'command-output'
                  : msg.role;
   wrap.className = 'msg msg-' + cssRole;
+  wrap.dataset.i = msg.i;
 
   let roleLabel, roleClass;
   if (msg.role === 'user' && msg.kind === 'command') {
@@ -785,17 +836,43 @@ function renderMessage(msg) {
       el.textContent = block.text;
       wrap.appendChild(el);
     } else {
-      wrap.appendChild(renderBlock(block, msg.role));
+      wrap.appendChild(renderBlock(block, msg.role, ctx));
     }
   }
   return wrap;
 }
 
-function renderBlock(block, role) {
+function renderImage(src) {
+  const link = document.createElement('a');
+  link.className = 'msg-image-link';
+  link.href = src;
+  link.title = '查看大图';
+  link.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    openImageViewer(src, link);
+  });
+  const img = document.createElement('img');
+  img.className = 'msg-image';
+  img.src = src;
+  img.alt = '消息中的图片';
+  img.loading = 'lazy';
+  link.appendChild(img);
+  return link;
+}
+
+function renderBlock(block, role, ctx) {
+  if (block.type === 'image') return renderImage(block.src);
   if (block.type === 'text') {
     const el = document.createElement('div');
     el.className = 'msg-text';
-    el.innerHTML = renderMarkdownLite(block.text);
+    if (role === 'assistant') {
+      el.innerHTML = renderMarkdownLite(block.text);
+    } else {
+      // 用户输入和命令输出原样显示，粘贴的日志、标签不当作 Markdown/HTML 解析
+      el.classList.add('msg-plain');
+      el.textContent = block.text;
+    }
     return el;
   }
   if (block.type === 'thinking') {
@@ -805,7 +882,7 @@ function renderBlock(block, role) {
     return el;
   }
   if (block.type === 'tool_use') {
-    return renderToolUse(block);
+    return renderToolUse(block, ctx);
   }
   if (block.type === 'tool_result') {
     return renderToolResult(block);
@@ -815,9 +892,51 @@ function renderBlock(block, role) {
   return el;
 }
 
-function renderToolUse(block) {
+// 工具块上和结果相关的部分（失败标记、子 Agent 入口、结果内容）。结果可能晚于调用到达，所以可重复执行
+function attachToolResult(el, block, ctx) {
+  const result = ctx.results.get(block.id);
+  const agentId = (result && result.agentId) || ctx.agentByTool.get(block.id);
+  const summary = el.querySelector('.tool-summary');
+  if (agentId && !summary.querySelector('.tool-agent-btn')) {
+    const btn = document.createElement('button');
+    btn.className = 'tool-agent-btn';
+    btn.textContent = '查看子 Agent 过程';
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      openDrawer({ kind: 'agent', agentId });
+    });
+    summary.appendChild(btn);
+  }
+  if (!result) {
+    el.dataset.pending = '1';
+    return;
+  }
+  delete el.dataset.pending;
+  if (result.is_error) {
+    el.classList.add('has-error');
+    const badge = document.createElement('span');
+    badge.className = 'tool-error-badge';
+    badge.textContent = '✗ 失败';
+    summary.insertBefore(badge, summary.querySelector('.tool-preview'));
+  }
+  if (!ctx.showResults) return;
+  const detail = el.querySelector('.tool-detail');
+  const label = document.createElement('div');
+  label.className = 'tool-label';
+  label.textContent = result.is_error ? '错误信息' : '结果';
+  detail.appendChild(label);
+  const pre = document.createElement('pre');
+  pre.textContent = result.text || '(空)';
+  detail.appendChild(pre);
+  for (const src of result.images || []) detail.appendChild(renderImage(src));
+}
+
+function renderToolUse(block, ctx) {
   const el = document.createElement('div');
   el.className = 'tool-block';
+  // 只看错误时，错误信息就是要看的内容，默认展开
+  if (ctx === state.detail && state.viewMode === 'errors') el.classList.add('open');
+  el.dataset.toolId = block.id;
   const preview = buildToolPreview(block.name, block.input);
 
   el.innerHTML = `
@@ -858,6 +977,7 @@ function renderToolUse(block) {
     detail.appendChild(pre);
   }
 
+  attachToolResult(el, block, ctx);
   el.querySelector('.tool-summary').addEventListener('click', () => el.classList.toggle('open'));
   return el;
 }
@@ -971,12 +1091,15 @@ if (window.marked) {
     headerIds: false,
     mangle: false,
   });
+  // 消息里的 HTML 一律按文字显示
+  marked.use({ renderer: { html: (html) => escapeHtml(typeof html === 'string' ? html : html.text) } });
 }
 function renderMarkdownLite(text) {
   if (!text) return '';
-  if (!window.marked) return escapeHtml(text).replace(/\n/g, '<br>');
+  // DOMPurify 没加载到时不信任 marked 的输出（如 javascript: 链接），退化为纯文本
+  if (!window.marked || !window.DOMPurify) return escapeHtml(text).replace(/\n/g, '<br>');
   try {
-    return marked.parse(text);
+    return DOMPurify.sanitize(marked.parse(text));
   } catch (e) {
     console.warn('markdown 渲染失败', e);
     return escapeHtml(text).replace(/\n/g, '<br>');
@@ -1125,6 +1248,702 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape' && !settingsModal.hidden) closeSettings();
 });
 
+// ---- 图片弹窗 ----
+const imageViewer = $('#image-viewer');
+const imageViewerImg = $('#image-viewer-img');
+let imageViewerOpener = null;
+
+// 按原始清晰度显示：1 个图片像素对应 1 个屏幕物理像素，不缩放，比窗口大时滚动查看。
+// 不能直接设 width = 原图宽 / 屏幕倍率：结果不是整数时（如 1919 / 2）浏览器布局会取整，图片被轻微拉伸而变糊。
+// 所以布局上保持原图的整数尺寸，用 transform 缩放，位置也对齐到物理像素
+function layoutImageViewer() {
+  const dpr = window.devicePixelRatio;
+  const offset = (space, size) => Math.max(24, Math.floor((space - size / dpr) / 2 * dpr) / dpr);
+  const x = offset(imageViewer.clientWidth, imageViewerImg.naturalWidth);
+  const y = offset(imageViewer.clientHeight, imageViewerImg.naturalHeight);
+  imageViewerImg.style.transform = `translate(${x}px, ${y}px) scale(${1 / dpr})`;
+  $('#image-viewer-info').textContent = `原图 ${imageViewerImg.naturalWidth}×${imageViewerImg.naturalHeight} · 未缩放 · 屏幕倍率 ${+dpr.toFixed(2)}x`;
+}
+imageViewerImg.addEventListener('load', () => {
+  layoutImageViewer();
+  imageViewerImg.style.visibility = 'visible';
+});
+window.addEventListener('resize', () => {
+  if (!imageViewer.hidden && imageViewerImg.naturalWidth) layoutImageViewer();
+});
+
+function openImageViewer(src, opener) {
+  imageViewerImg.style.visibility = 'hidden'; // 算好尺寸再显示，避免闪一下
+  imageViewerImg.src = src;
+  imageViewer.hidden = false;
+  imageViewer.scrollTo(0, 0);
+  imageViewerOpener = opener;
+  $('#image-viewer-close').focus();
+}
+
+function closeImageViewer() {
+  imageViewer.hidden = true;
+  imageViewerImg.removeAttribute('src');
+  if (imageViewerOpener) imageViewerOpener.focus();
+  imageViewerOpener = null;
+}
+
+// 点击任意位置都关闭，包括图片本身
+imageViewer.addEventListener('click', closeImageViewer);
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && !imageViewer.hidden) closeImageViewer();
+});
+
+// ---- 消息定位 ----
+const msgSearchInput = $('#msg-search');
+const msgSearchCount = $('#msg-search-count');
+const msgSearchHint = $('#msg-search-hint');
+const viewModesEl = $('#view-modes');
+
+// 滚到展示列表第 i 条：未渲染的先渲染，折叠的先展开，优先对准其中的搜索命中
+function revealMessage(i, { flash = true } = {}) {
+  const d = state.detail;
+  if (!d || !d.messages[i]) return null;
+  if (i < d.start) renderEarlierBatch(messagesEl, i);
+  const el = messagesEl.querySelector(`.msg[data-i="${i}"]`);
+  if (!el) return null;
+  const group = el.closest('.sidechain-group');
+  if (group) group.classList.add('open');
+  const mark = el.querySelector('.msg-mark');
+  if (mark) {
+    const details = mark.closest('details');
+    if (details) details.open = true;
+    const tool = mark.closest('.tool-block');
+    if (tool) tool.classList.add('open');
+    mark.scrollIntoView({ block: 'center' });
+  } else {
+    el.scrollIntoView({ block: 'start' });
+  }
+  if (flash) {
+    el.classList.remove('msg-flash');
+    void el.offsetWidth; // 重复定位同一条时也重新播放动画
+    el.classList.add('msg-flash');
+  }
+  return el;
+}
+
+// 按原始消息下标定位：这条在当前模式下被隐藏时，取其后最近的一条
+function revealRaw(rawIndex, options) {
+  const msgs = state.detail ? state.detail.messages : [];
+  if (!msgs.length) return;
+  const target = msgs.find(m => m.rawIndex >= rawIndex) || msgs[msgs.length - 1];
+  revealMessage(target.i, options);
+}
+
+// ---- 显示模式 ----
+function syncViewModeButtons() {
+  $$('.view-mode', viewModesEl).forEach(b => b.classList.toggle('on', b.dataset.mode === state.viewMode));
+}
+
+function setViewMode(mode) {
+  if (mode === state.viewMode) return;
+  state.viewMode = mode;
+  localStorage.setItem(LS_VIEW_MODE, mode);
+  syncViewModeButtons();
+  const d = state.detail;
+  if (!d || !state.currentId) return;
+  // 切换后停留在原来看的位置
+  const box = messagesEl.getBoundingClientRect();
+  const firstVisible = $$('.msg', messagesEl).find(el => el.getBoundingClientRect().bottom > box.top);
+  const anchor = firstVisible && d.messages[Number(firstVisible.dataset.i)];
+  d.showResults = resultsShownIn(mode);
+  d.messages = buildView(d, mode);
+  d.start = Math.max(0, d.messages.length - MSG_PAGE_SIZE);
+  messagesEl.innerHTML = '';
+  renderInitialBatch(messagesEl);
+  renderEmptyView(messagesEl);
+  rerunMsgSearch();
+  if (anchor) revealRaw(anchor.rawIndex, { flash: false });
+}
+
+viewModesEl.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('.view-mode');
+  if (btn) setViewMode(btn.dataset.mode);
+});
+syncViewModeButtons();
+
+// ---- 会话内搜索 ----
+function messageSearchText(m, ctx) {
+  const parts = [];
+  for (const b of m.blocks) {
+    if (b.type === 'text' || b.type === 'thinking') parts.push(b.text);
+    else if (b.type === 'tool_use') {
+      parts.push(b.name, JSON.stringify(b.input));
+      const result = ctx.results.get(b.id);
+      if (ctx.showResults && result) parts.push(result.text);
+    }
+  }
+  return parts.join('\n').toLowerCase();
+}
+
+function findHits(messages, ctx, query) {
+  const q = query.toLowerCase();
+  return messages.filter(m => messageSearchText(m, ctx).includes(q)).map(m => m.i);
+}
+
+function clearSearchMarks() {
+  $$('.msg-mark', messagesEl).forEach(mark => {
+    const parent = mark.parentNode;
+    parent.replaceChild(document.createTextNode(mark.textContent), mark);
+    parent.normalize();
+  });
+  $$('.msg[data-marked]', messagesEl).forEach(el => { delete el.dataset.marked; });
+  $$('.msg-current', messagesEl).forEach(el => el.classList.remove('msg-current'));
+}
+
+function markTextIn(root, query) {
+  const re = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'ig');
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    const text = node.nodeValue;
+    re.lastIndex = 0;
+    if (!re.test(text)) continue;
+    re.lastIndex = 0;
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    for (const m of text.matchAll(re)) {
+      frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+      const mark = document.createElement('mark');
+      mark.className = 'msg-mark';
+      mark.textContent = m[0];
+      frag.appendChild(mark);
+      last = m.index + m[0].length;
+    }
+    frag.appendChild(document.createTextNode(text.slice(last)));
+    node.parentNode.replaceChild(frag, node);
+  }
+}
+
+// 给已渲染的命中消息加高亮；新一批消息渲染后也会调用
+function markSearchHits() {
+  const { query, hits } = state.search;
+  if (!query) return;
+  for (const i of hits) {
+    const el = messagesEl.querySelector(`.msg[data-i="${i}"]:not([data-marked])`);
+    if (!el) continue;
+    el.dataset.marked = '1';
+    markTextIn(el, query);
+  }
+}
+
+function updateSearchStatus(altCount = 0) {
+  const { query, hits, current } = state.search;
+  msgSearchCount.textContent = !query ? '' : hits.length ? `${current + 1} / ${hits.length}` : '无结果';
+  msgSearchHint.hidden = !altCount;
+  msgSearchHint.textContent = altCount ? `全部工具下有 ${altCount} 条` : '';
+}
+
+function goToHit(index) {
+  const { hits } = state.search;
+  if (!hits.length) return;
+  state.search.current = (index + hits.length) % hits.length;
+  $$('.msg-current', messagesEl).forEach(el => el.classList.remove('msg-current'));
+  const el = revealMessage(hits[state.search.current]);
+  if (el) el.classList.add('msg-current');
+  updateSearchStatus();
+}
+
+// 重新计算命中。jump：跳到第一条；否则尽量留在当前这条（实时更新、切模式时）
+function runMsgSearch(query, { jump = false } = {}) {
+  const d = state.detail;
+  const previous = state.search.hits[state.search.current];
+  clearSearchMarks();
+  const hits = query && d ? findHits(d.messages, d, query) : [];
+  state.search = { query, hits, current: hits.length ? Math.max(0, hits.indexOf(previous)) : -1 };
+  markSearchHits();
+  let altCount = 0;
+  if (query && d && !hits.length && state.viewMode !== 'tools') {
+    // 当前模式没搜到时，提示切到全部工具可能有
+    const allCtx = { ...d, showResults: true };
+    altCount = findHits(buildView(allCtx, 'tools'), allCtx, query).length;
+  }
+  updateSearchStatus(altCount);
+  if (jump) goToHit(0);
+  else if (state.search.current >= 0) {
+    const el = messagesEl.querySelector(`.msg[data-i="${hits[state.search.current]}"]`);
+    if (el) el.classList.add('msg-current');
+  }
+}
+
+function rerunMsgSearch() {
+  if (state.search.query) runMsgSearch(state.search.query);
+}
+
+function clearMsgSearch() {
+  msgSearchInput.value = '';
+  runMsgSearch('');
+}
+
+function searchFromGlobal(query) {
+  const d = state.detail;
+  if (!d || !findHits(d.messages, d, query).length) return;
+  msgSearchInput.value = query;
+  runMsgSearch(query, { jump: true });
+}
+
+let msgSearchTimer = null;
+msgSearchInput.addEventListener('input', () => {
+  clearTimeout(msgSearchTimer);
+  msgSearchTimer = setTimeout(() => runMsgSearch(msgSearchInput.value.trim(), { jump: true }), 150);
+});
+msgSearchInput.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') {
+    ev.preventDefault();
+    clearTimeout(msgSearchTimer);
+    const q = msgSearchInput.value.trim();
+    if (q !== state.search.query) runMsgSearch(q, { jump: true });
+    else goToHit(state.search.current + (ev.shiftKey ? -1 : 1));
+  } else if (ev.key === 'Escape') {
+    clearMsgSearch();
+    msgSearchInput.blur();
+  }
+});
+$('#msg-search-next').addEventListener('click', () => goToHit(state.search.current + 1));
+$('#msg-search-prev').addEventListener('click', () => goToHit(state.search.current - 1));
+msgSearchHint.addEventListener('click', () => {
+  setViewMode('tools');
+  runMsgSearch(state.search.query, { jump: true });
+});
+// ⌘F / Ctrl+F：消息是分批渲染的，浏览器自带查找搜不全，先进入会话内搜索；已在搜索框里再按一次则用浏览器的
+document.addEventListener('keydown', (ev) => {
+  if (!(ev.metaKey || ev.ctrlKey) || ev.key.toLowerCase() !== 'f') return;
+  if (detailContent.hidden || !statsOverlay.hidden || $('.modal:not([hidden])')) return;
+  if (document.activeElement === msgSearchInput) return;
+  ev.preventDefault();
+  msgSearchInput.focus();
+  msgSearchInput.select();
+});
+
+// ---- 上下文曲线 ----
+const contextPanel = $('#context-panel');
+const toggleContextBtn = $('#toggle-context');
+
+// 单系列折线：hover 时显示竖线和当前点，两张图联动
+function contextChartSVG(values, width, height, fmt) {
+  const padL = 46, padR = 12, padT = 10, padB = 8;
+  const max = Math.max(...values, 1);
+  const xAt = i => padL + (values.length === 1 ? (width - padL - padR) / 2 : i * (width - padL - padR) / (values.length - 1));
+  const yAt = v => padT + (height - padT - padB) * (1 - v / max);
+  const line = values.map((v, i) => `${i ? 'L' : 'M'}${xAt(i).toFixed(1)} ${yAt(v).toFixed(1)}`).join(' ');
+  const gridLines = [0, max / 2, max].map(v => `
+    <line class="cc-grid" x1="${padL}" x2="${width - padR}" y1="${yAt(v)}" y2="${yAt(v)}"/>
+    <text class="cc-axis" x="${padL - 6}" y="${yAt(v) + 3}" text-anchor="end">${escapeHtml(fmt(v))}</text>`).join('');
+  return {
+    xAt,
+    yAt,
+    svg: `<svg class="cc-svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+      ${gridLines}
+      <path class="cc-line" d="${line}"/>
+      <line class="cc-cross" y1="${padT}" y2="${height - padB}" visibility="hidden"/>
+      <circle class="cc-dot" r="4" visibility="hidden"/>
+    </svg>`,
+  };
+}
+
+function renderContextPanel() {
+  contextPanel.hidden = !state.showContext;
+  toggleContextBtn.classList.toggle('on', state.showContext);
+  const d = state.detail;
+  if (!state.showContext || !d) return;
+  const points = d.timeline;
+  if (!points.length) {
+    contextPanel.innerHTML = '<div class="stats-empty">本会话没有 token 记录</div>';
+    return;
+  }
+  let total = 0;
+  const cumulative = points.map(p => (total += p.costUSD));
+  const contexts = points.map(p => p.context);
+  const peak = Math.max(...contexts);
+  const lastModel = points[points.length - 1].model;
+  const win = contextWindowFor(lastModel);
+  contextPanel.innerHTML = `
+    <div class="cc-chart">
+      <div class="cc-title">上下文大小 <b>峰值 ${fmtTokens(peak)}</b>${win ? ` <span>/ ${fmtTokens(win)}（${Math.round(peak * 100 / win)}%）</span>` : ''}</div>
+      <div class="cc-plot" role="img" aria-label="上下文大小随轮次变化，共 ${points.length} 轮，峰值 ${fmtTokens(peak)}"></div>
+    </div>
+    <div class="cc-chart">
+      <div class="cc-title">累计花费 <b>${fmtUSD(total)}</b> <span>共 ${points.length} 轮</span></div>
+      <div class="cc-plot" role="img" aria-label="累计花费随轮次变化，合计 ${fmtUSD(total)}"></div>
+    </div>
+    <div class="cc-tooltip" hidden></div>
+  `;
+  const plots = $$('.cc-plot', contextPanel);
+  const tooltip = $('.cc-tooltip', contextPanel);
+  const charts = [
+    { values: contexts, fmt: fmtTokens },
+    { values: cumulative, fmt: total < 10 ? fmtUSD : fmtUSDShort }, // 金额小时取整会出现重复刻度
+  ].map((c, n) => {
+    const chart = contextChartSVG(c.values, Math.max(240, plots[n].clientWidth), 96, c.fmt);
+    plots[n].innerHTML = chart.svg;
+    return { ...chart, values: c.values, plot: plots[n] };
+  });
+  const indexAt = (ev, plot) => {
+    const x = ev.clientX - plot.getBoundingClientRect().left;
+    let best = 0;
+    for (let i = 0; i < points.length; i++) {
+      if (Math.abs(charts[0].xAt(i) - x) < Math.abs(charts[0].xAt(best) - x)) best = i;
+    }
+    return best;
+  };
+  const hide = () => {
+    tooltip.hidden = true;
+    $$('.cc-cross, .cc-dot', contextPanel).forEach(el => el.setAttribute('visibility', 'hidden'));
+  };
+  for (const { plot } of charts) {
+    plot.addEventListener('pointermove', (ev) => {
+      const i = indexAt(ev, plot);
+      for (const c of charts) {
+        const cross = $('.cc-cross', c.plot);
+        const dot = $('.cc-dot', c.plot);
+        cross.setAttribute('x1', c.xAt(i));
+        cross.setAttribute('x2', c.xAt(i));
+        cross.setAttribute('visibility', 'visible');
+        dot.setAttribute('cx', c.xAt(i));
+        dot.setAttribute('cy', c.yAt(c.values[i]));
+        dot.setAttribute('visibility', 'visible');
+      }
+      const p = points[i];
+      tooltip.innerHTML = `
+        <div class="cc-tip-head">第 ${i + 1} 轮 · ${fmtTime(p.timestamp)}</div>
+        <div>上下文 <b>${fmtTokens(p.context)}</b></div>
+        <div>本轮输出 <b>${fmtTokens(p.output)}</b> · 花费 <b>${fmtUSD(p.costUSD)}</b></div>
+        <div>累计花费 <b>${fmtUSD(cumulative[i])}</b></div>
+        <div class="cc-tip-foot">${escapeHtml(p.model || '')} · 点击定位到消息</div>`;
+      tooltip.hidden = false;
+      const box = contextPanel.getBoundingClientRect();
+      const left = Math.min(ev.clientX - box.left + 14, box.width - tooltip.offsetWidth - 8);
+      tooltip.style.left = `${Math.max(8, left)}px`;
+    });
+    plot.addEventListener('pointerleave', hide);
+    plot.addEventListener('click', (ev) => revealRaw(points[indexAt(ev, plot)].messageIndex));
+  }
+}
+
+toggleContextBtn.addEventListener('click', () => {
+  state.showContext = !state.showContext;
+  localStorage.setItem('cv.showContext', state.showContext ? '1' : '0');
+  renderContextPanel();
+});
+window.addEventListener('resize', () => { if (state.showContext && !detailContent.hidden) renderContextPanel(); });
+
+// ---- 本会话改动的文件 ----
+const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+
+function editPairs(name, input) {
+  if (name === 'Edit') return [[input.old_string || '', input.new_string || '']];
+  if (name === 'Write') return [['', input.content || '']];
+  if (name === 'MultiEdit') return (input.edits || []).map(e => [e.old_string || '', e.new_string || '']);
+  if (name === 'NotebookEdit') return [[input.old_source || '', input.new_source || '']];
+  return [];
+}
+
+function countLines(s) {
+  return s ? s.replace(/\n$/, '').split('\n').length : 0;
+}
+
+function countPairs(pairs) {
+  let added = 0, removed = 0;
+  for (const [oldStr, newStr] of pairs) {
+    if (!window.Diff) { added += countLines(newStr); removed += countLines(oldStr); continue; }
+    for (const p of Diff.diffLines(oldStr, newStr)) {
+      if (p.added) added += countLines(p.value);
+      else if (p.removed) removed += countLines(p.value);
+    }
+  }
+  return { added, removed };
+}
+
+function countHunks(hunks) {
+  let added = 0, removed = 0;
+  for (const h of hunks) {
+    for (const line of h.lines || []) {
+      if (line[0] === '+') added++;
+      else if (line[0] === '-') removed++;
+    }
+  }
+  return { added, removed };
+}
+
+// 优先用工具结果里的实际改动（含 Bash 改的文件）；没有结果（运行中、旧版本记录）或失败时才看工具参数
+function buildFileChanges(d) {
+  const files = new Map();
+  const add = (file, change) => {
+    if (!file) return;
+    if (!files.has(file)) files.set(file, { file, changes: [], added: 0, removed: 0, lastIndex: 0, failedOnly: true });
+    const f = files.get(file);
+    f.changes.push(change);
+    f.lastIndex = change.rawIndex;
+    if (change.failed) return;
+    f.failedOnly = false;
+    f.added += change.added;
+    f.removed += change.removed;
+  };
+  d.raw.forEach((m, rawIndex) => {
+    if (m.role !== 'assistant') return;
+    for (const b of m.blocks) {
+      if (b.type !== 'tool_use') continue;
+      const result = d.results.get(b.id);
+      const base = { tool: b.name, rawIndex, timestamp: m.timestamp };
+      if (result && result.patch) {
+        for (const p of result.patch) {
+          if (p.hunks.length) {
+            add(p.file, { ...base, hunks: p.hunks, ...countHunks(p.hunks) });
+          } else {
+            // 新建文件没有 hunk；Bash 改动可能只给文件名
+            const pairs = editPairs(b.name, b.input || {});
+            add(p.file, { ...base, pairs, ...countPairs(pairs) });
+          }
+        }
+      } else if (EDIT_TOOLS.has(b.name)) {
+        const input = b.input || {};
+        const pairs = editPairs(b.name, input);
+        add(input.file_path || input.notebook_path, {
+          ...base, pairs, ...countPairs(pairs), failed: !!(result && result.is_error),
+        });
+      }
+    }
+  });
+  return [...files.values()].sort((a, b) => b.lastIndex - a.lastIndex);
+}
+
+function buildHunkView(hunks) {
+  const view = document.createElement('div');
+  view.className = 'diff-view';
+  hunks.forEach((h) => {
+    const head = document.createElement('div');
+    head.className = 'diff-hunk-head';
+    head.textContent = `第 ${h.newStart} 行`;
+    view.appendChild(head);
+    for (const line of h.lines || []) {
+      const cls = line[0] === '+' ? 'diff-add' : line[0] === '-' ? 'diff-del' : 'diff-eq';
+      const row = document.createElement('div');
+      row.className = 'diff-line ' + cls;
+      row.innerHTML = `<span class="diff-mark">${escapeHtml(line[0] || ' ')}</span><span class="diff-text">${escapeHtml(line.slice(1)) || '&#8203;'}</span>`;
+      view.appendChild(row);
+    }
+  });
+  return view;
+}
+
+function renderFileChange(change) {
+  const wrap = document.createElement('div');
+  wrap.className = 'fc-change';
+  const head = document.createElement('div');
+  head.className = 'fc-change-head';
+  head.innerHTML = `
+    <span class="tool-name">${escapeHtml(change.tool)}</span>
+    <span class="fc-time">${fmtTime(change.timestamp)}</span>
+    ${change.failed ? '<span class="tool-error-badge">✗ 未生效</span>'
+      : `<span class="fc-stat"><span class="fc-add">+${change.added}</span> <span class="fc-del">−${change.removed}</span></span>`}
+    <button class="fc-locate">定位到消息</button>
+  `;
+  head.querySelector('.fc-locate').addEventListener('click', () => revealRaw(change.rawIndex));
+  wrap.appendChild(head);
+  if (change.hunks) {
+    wrap.appendChild(buildHunkView(change.hunks));
+  } else if (change.pairs.some(([oldStr, newStr]) => oldStr || newStr)) {
+    for (const [oldStr, newStr] of change.pairs) wrap.appendChild(buildDiffView(oldStr, newStr));
+  } else {
+    const note = document.createElement('div');
+    note.className = 'fc-note';
+    note.textContent = '只记录了改动的文件名，没有具体差异';
+    wrap.appendChild(note);
+  }
+  return wrap;
+}
+
+function renderFilesDrawer(body) {
+  const files = buildFileChanges(state.detail);
+  if (!files.length) {
+    body.innerHTML = '<div class="view-empty">本会话没有改动文件</div>';
+    return;
+  }
+  for (const f of files) {
+    const item = document.createElement('div');
+    item.className = 'fc-file' + (state.openFiles.has(f.file) ? ' open' : '') + (f.failedOnly ? ' failed' : '');
+    const name = f.file.split(/[\\/]/).pop();
+    const dir = shortProject(f.file.slice(0, f.file.length - name.length));
+    const head = document.createElement('div');
+    head.className = 'fc-file-head';
+    head.title = f.file;
+    head.innerHTML = `
+      <span class="tool-caret">▶</span>
+      <span class="fc-name">${escapeHtml(name)}<span class="fc-dir">${escapeHtml(dir)}</span></span>
+      <span class="fc-count">${f.changes.length} 次</span>
+      <span class="fc-stat"><span class="fc-add">+${f.added}</span> <span class="fc-del">−${f.removed}</span></span>
+    `;
+    const changes = document.createElement('div');
+    changes.className = 'fc-changes';
+    const fill = () => { changes.innerHTML = ''; f.changes.forEach(c => changes.appendChild(renderFileChange(c))); };
+    if (state.openFiles.has(f.file)) fill();
+    head.addEventListener('click', () => {
+      const open = item.classList.toggle('open');
+      if (open) { state.openFiles.add(f.file); fill(); } else state.openFiles.delete(f.file);
+    });
+    item.appendChild(head);
+    item.appendChild(changes);
+    body.appendChild(item);
+  }
+}
+
+// ---- 子 Agent ----
+function agentLabel(a) {
+  return a.description || a.name || (a.skillName ? `技能 ${a.skillName}` : a.agentId);
+}
+
+function renderAgentsDrawer(body) {
+  const { agents } = state.detail;
+  if (!agents.length) {
+    body.innerHTML = '<div class="view-empty">本会话没有子 Agent</div>';
+    return;
+  }
+  for (const a of agents) {
+    const row = document.createElement('button');
+    row.className = 'agent-row';
+    row.innerHTML = `
+      <span class="agent-name">${escapeHtml(agentLabel(a))}</span>
+      <span class="agent-meta">${escapeHtml(a.agentType || (a.skillName ? 'skill' : 'agent'))}${a.finished ? '' : ' · 运行中'} · ${fmtTime(new Date(a.updatedAt).toISOString())}</span>
+    `;
+    row.addEventListener('click', () => openDrawer({ kind: 'agent', agentId: a.agentId }));
+    body.appendChild(row);
+  }
+}
+
+async function renderAgentDrawer(body, agentId) {
+  const sessionId = state.currentId;
+  body.innerHTML = '<div class="view-empty">加载中...</div>';
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}/agents/${agentId}`);
+    if (!res.ok) throw new Error('加载失败');
+    const data = await res.json();
+    // 等待期间切了会话或面板，丢弃结果
+    if (state.currentId !== sessionId || !state.drawer || state.drawer.agentId !== agentId) return;
+    const ctx = buildDetailCtx(data, true);
+    const view = buildView(ctx, 'tools');
+    body.innerHTML = '';
+    if (!view.length) body.innerHTML = '<div class="view-empty">没有内容</div>';
+    renderMessageGroup(body, view, ctx);
+    highlightNewCodeBlocks(body);
+  } catch (e) {
+    if (state.drawer && state.drawer.agentId === agentId) {
+      body.innerHTML = `<div class="view-empty">${escapeHtml(e.message)}</div>`;
+    }
+  }
+}
+
+// ---- 右侧面板 ----
+const sideDrawer = $('#side-drawer');
+const drawerBody = $('#drawer-body');
+const toggleFilesBtn = $('#toggle-files');
+const toggleAgentsBtn = $('#toggle-agents');
+
+function renderDrawer() {
+  const drawer = state.drawer;
+  sideDrawer.hidden = !drawer || !state.detail;
+  toggleFilesBtn.classList.toggle('on', !!drawer && drawer.kind === 'files');
+  toggleAgentsBtn.classList.toggle('on', !!drawer && drawer.kind !== 'files');
+  if (sideDrawer.hidden) return;
+  $('#drawer-back').hidden = drawer.kind !== 'agent';
+  const scrollTop = drawerBody.scrollTop;
+  drawerBody.innerHTML = '';
+  if (drawer.kind === 'files') {
+    $('#drawer-title').textContent = '本会话改动的文件';
+    renderFilesDrawer(drawerBody);
+    drawerBody.scrollTop = scrollTop;
+  } else if (drawer.kind === 'agents') {
+    $('#drawer-title').textContent = '子 Agent';
+    renderAgentsDrawer(drawerBody);
+    drawerBody.scrollTop = scrollTop;
+  } else {
+    const agent = state.detail.agents.find(a => a.agentId === drawer.agentId);
+    $('#drawer-title').textContent = agent ? agentLabel(agent) : '子 Agent';
+    renderAgentDrawer(drawerBody, drawer.agentId);
+  }
+}
+
+function openDrawer(drawer) {
+  state.drawer = drawer;
+  drawerBody.scrollTop = 0;
+  renderDrawer();
+}
+
+function toggleDrawer(kind) {
+  const same = state.drawer && (state.drawer.kind === kind || (kind === 'agents' && state.drawer.kind === 'agent'));
+  openDrawer(same ? null : { kind });
+}
+
+toggleFilesBtn.addEventListener('click', () => toggleDrawer('files'));
+toggleAgentsBtn.addEventListener('click', () => toggleDrawer('agents'));
+$('#drawer-close').addEventListener('click', () => openDrawer(null));
+$('#drawer-back').addEventListener('click', () => openDrawer({ kind: 'agents' }));
+
+// 详情数据变化后刷新工具栏和面板。正在看的子 Agent 过程不打断
+function refreshPanels() {
+  const d = state.detail;
+  $('#files-count').textContent = buildFileChanges(d).filter(f => !f.failedOnly).length;
+  $('#agents-count').textContent = d.agents.length;
+  renderContextPanel();
+  if (!state.drawer || state.drawer.kind !== 'agent') renderDrawer();
+  else toggleAgentsBtn.classList.add('on');
+}
+
+// ---- 通用对话框（替代原生 alert / confirm / prompt）----
+// 传 input 时返回输入内容（取消为 null），否则返回 true / false
+const dialogModal = $('#dialog-modal');
+const dialogInput = $('#dialog-input');
+const dialogOk = $('#dialog-ok');
+const dialogCancel = $('#dialog-cancel');
+let dialogResolve = null;
+
+function closeDialog(confirmed) {
+  if (!dialogResolve) return;
+  const hasInput = !dialogInput.hidden;
+  dialogResolve(hasInput ? (confirmed ? dialogInput.value : null) : confirmed);
+  dialogResolve = null;
+  dialogModal.hidden = true;
+}
+
+function askDialog({ title, message = '', input = null, okText = '确定', danger = false, cancel = true }) {
+  closeDialog(false);
+  $('#dialog-title').textContent = title;
+  $('#dialog-message').textContent = message;
+  dialogInput.hidden = input === null;
+  dialogInput.value = input === null ? '' : input;
+  dialogOk.textContent = okText;
+  dialogOk.classList.toggle('btn-danger', danger);
+  dialogOk.classList.toggle('btn-primary', !danger);
+  dialogCancel.hidden = !cancel;
+  dialogModal.hidden = false;
+  if (input === null) {
+    dialogOk.focus();
+  } else {
+    dialogInput.focus();
+    dialogInput.select();
+  }
+  return new Promise(resolve => { dialogResolve = resolve; });
+}
+
+function showError(message) {
+  return askDialog({ title: '操作失败', message, cancel: false });
+}
+
+dialogOk.addEventListener('click', () => closeDialog(true));
+dialogCancel.addEventListener('click', () => closeDialog(false));
+$('.modal-backdrop', dialogModal).addEventListener('click', () => closeDialog(false));
+dialogModal.addEventListener('keydown', (ev) => {
+  // 阻止冒泡：Esc 只关对话框，不连带关闭下层的标签弹窗或统计页
+  ev.stopPropagation();
+  if (ev.key === 'Escape') closeDialog(false);
+  else if (ev.key === 'Enter' && ev.target === dialogInput) closeDialog(true);
+});
+
 // ---- Tag 系统：弹窗、过滤、详情绑定 ----
 const tagsModal = $('#tags-modal');
 const tagsLibraryList = $('#tag-library-list');
@@ -1160,16 +1979,21 @@ function renderTagLibrary() {
   tagsLibraryList.querySelectorAll('.tag-row').forEach(row => {
     const id = row.dataset.id;
     row.querySelector('.tag-row-color').addEventListener('change', (ev) => updateTag(id, { color: ev.target.value }));
-    row.querySelector('.tag-row-rename').addEventListener('click', () => {
+    row.querySelector('.tag-row-rename').addEventListener('click', async () => {
       const t = tagById(id); if (!t) return;
-      const newName = prompt('新名称:', t.name);
+      const newName = await askDialog({ title: '重命名标签', message: '新名称', input: t.name });
       if (newName === null) return;
       updateTag(id, { name: newName.trim() });
     });
-    row.querySelector('.tag-row-delete').addEventListener('click', () => {
+    row.querySelector('.tag-row-delete').addEventListener('click', async () => {
       const t = tagById(id); if (!t) return;
-      if (!confirm(`删除标签「${t.name}」？\n所有会话上的此标签都会被解绑。`)) return;
-      deleteTag(id);
+      const ok = await askDialog({
+        title: '删除标签',
+        message: `删除标签「${t.name}」？\n所有会话上的此标签都会被解绑。`,
+        okText: '删除',
+        danger: true,
+      });
+      if (ok) deleteTag(id);
     });
   });
 }
@@ -1206,7 +2030,7 @@ async function updateTag(id, patch) {
     renderTagFilterRow();
     applyFilterAndSort();
     if (state.currentId) refreshCurrentDetail();
-  } catch (e) { alert('更新失败: ' + e.message); }
+  } catch (e) { showError('更新失败: ' + e.message); }
 }
 
 async function deleteTag(id) {
@@ -1225,7 +2049,7 @@ async function deleteTag(id) {
     renderTagFilterRow();
     loadSessions(state.query);
     if (state.currentId) refreshCurrentDetail();
-  } catch (e) { alert('删除失败: ' + e.message); }
+  } catch (e) { showError('删除失败: ' + e.message); }
 }
 
 async function updateSessionTags(sessionId, tagIds) {
@@ -1238,7 +2062,7 @@ async function updateSessionTags(sessionId, tagIds) {
     if (s) s.tags = data.tags || [];
     applyFilterAndSort();
     if (state.currentId === sessionId) refreshCurrentDetail();
-  } catch (e) { alert('绑定 tag 失败: ' + e.message); }
+  } catch (e) { showError('绑定 tag 失败: ' + e.message); }
 }
 
 function renderTagFilterRow() {
@@ -1436,7 +2260,7 @@ function renderStats(data) {
     </div>`).join('');
 
   const topSessRows = data.topSessions.slice(0, 10).map((s, i) => {
-    const label = s.customName || (s.titlePreview || '').slice(0, 60);
+    const label = s.customName || s.aiTitle || (s.titlePreview || '').slice(0, 60);
     return `<div class="top-sess" data-id="${s.sessionId}">
       <span class="ts-rank">${i + 1}</span>
       <span class="ts-main">
@@ -1521,7 +2345,7 @@ document.addEventListener('keydown', (ev) => {
 });
 
 // ---- 主题切换（右上角下拉框） ----
-const THEMES = ['dark', 'mid', 'light'];
+const THEMES = ['dark', 'light', 'blue'];
 const LS_THEME = 'cv.theme';
 const themeSelect = $('#theme-select');
 
@@ -1529,14 +2353,23 @@ function applyTheme(t) {
   if (!THEMES.includes(t)) t = 'dark';
   if (t === 'dark') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.setAttribute('data-theme', t);
+  // 只有暗色主题用深色代码块
+  $('#hljs-theme').href = `https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/${t === 'dark' ? 'github-dark' : 'github'}.min.css`;
   themeSelect.value = t;
   localStorage.setItem(LS_THEME, t);
 }
 applyTheme(localStorage.getItem(LS_THEME) || 'dark');
 themeSelect.addEventListener('change', () => applyTheme(themeSelect.value));
 
-// 启动顺序：tag 库 + 用户偏好（pin/fav）→ 再拉会话列表
-Promise.all([loadTagLibrary(), loadPreferences()]).then(() => {
+async function loadHomeDir() {
+  try {
+    const res = await fetch('/api/config');
+    state.homeDir = (await res.json()).homeDir || '';
+  } catch (e) { console.warn('config 加载失败', e); }
+}
+
+// 启动顺序：tag 库 + 用户偏好（pin/fav）+ home 目录 → 再拉会话列表
+Promise.all([loadTagLibrary(), loadPreferences(), loadHomeDir()]).then(() => {
   renderTagFilterRow();
   loadSessions();
 });
@@ -1544,15 +2377,12 @@ Promise.all([loadTagLibrary(), loadPreferences()]).then(() => {
 // ---- SSE：文件变化自动同步（离开页面时暂停）----
 let eventSource = null;
 let detailRefreshTimer = null;
+let listRefreshTimer = null;
 
 function applySessionUpdate(meta) {
-  const idx = state.allSessions.findIndex(s => s.sessionId === meta.sessionId);
-  if (idx >= 0) {
-    state.allSessions[idx] = meta;
-  } else {
-    state.allSessions.unshift(meta);
-  }
-  applyFilterAndSort();
+  // 重新向服务端取列表，搜索词、标签过滤和排序才都是对的
+  clearTimeout(listRefreshTimer);
+  listRefreshTimer = setTimeout(() => loadSessions(state.query), 500);
   if (state.currentId === meta.sessionId) {
     // 当前正在看这个会话，去抖刷新详情（800ms 内多次只刷一次）
     clearTimeout(detailRefreshTimer);
@@ -1572,13 +2402,43 @@ function applySessionRemoved(sessionId) {
   }
 }
 
+// 只更新头部并追加新消息：不重建已渲染的内容，翻看历史时不跳动、展开的工具块不收起
 async function refreshCurrentDetail() {
-  if (!state.currentId) return;
+  const id = state.currentId;
+  if (!id) return;
   try {
-    const res = await fetch(`/api/sessions/${state.currentId}`);
+    const res = await fetch(`/api/sessions/${id}`);
     if (!res.ok) return;
     const data = await res.json();
-    renderDetail(data); // renderDetail 自己会滚到末尾
+    if (state.currentId !== id) return;
+    const d = state.detail;
+    const ctx = buildDetailCtx(data, resultsShownIn(state.viewMode));
+    const next = buildView(ctx, state.viewMode);
+    const prevLen = d ? d.messages.length : 0;
+    const appendOnly = d && next.length >= prevLen
+      && (prevLen === 0 || next[prevLen - 1].uuid === d.messages[prevLen - 1].uuid);
+    if (!appendOnly) {
+      renderDetail(data);
+      return;
+    }
+    renderDetailHeader(data.meta);
+    // 原本就在底部附近才跟随新消息
+    const atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+    Object.assign(d, ctx, { messages: next });
+    if (next.length > prevLen) {
+      if (!prevLen) messagesEl.innerHTML = '';
+      renderMessageGroup(messagesEl, next.slice(prevLen));
+    }
+    // 之前还没收到结果的工具块，现在补上
+    $$('.tool-block[data-pending]', messagesEl).forEach(el => {
+      const msg = d.messages[Number(el.closest('.msg').dataset.i)];
+      const block = msg && msg.blocks.find(b => b.id === el.dataset.toolId);
+      if (block) attachToolResult(el, block, d);
+    });
+    highlightNewCodeBlocks(messagesEl);
+    refreshPanels();
+    rerunMsgSearch();
+    if (atBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
   } catch (e) {
     console.warn('详情刷新失败', e);
   }

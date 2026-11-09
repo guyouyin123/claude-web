@@ -18,10 +18,16 @@ Claude Code 把你和 Claude 的每一次对话都以 `.jsonl` 形式保存在�
 - 📅 **时间范围过滤**：近 7 / 30 / 90 天或自定义起止
 - 📊 **Token 统计**：列表卡显示累计输入/输出；详情显示缓存命中率、末次上下文占用进度条；每条 Claude 回复显示本轮 token
 - 📝 **完整 Markdown 渲染**：代码块语法高亮、表格、列表、引用
-- 🤖 **子 Agent 折叠**：Task 子 agent 的内部消息聚合成可折叠块
+- 🤖 **子 Agent**：从调用它的工具块或「子 Agent」面板查看内部过程
+- 🔎 **会话内搜索**：`⌘F` / `Ctrl+F` 在当前会话中搜索并逐条定位；从全局搜索结果点进来时自动跳到第一处命中
+- 🎚️ **显示模式**：只看对话（默认）/ 常规 / 全部工具 / 只看错误
+- 📝 **改动文件**：汇总本会话改过的文件和 diff（含 Bash 改动），可定位回对应消息
+- 📉 **上下文曲线**：按轮次查看上下文大小和累计花费，点击定位到消息
+- 🖼️ **图片**：显示消息和工具结果中的图片
+- 🏷️ **自动标题**：没有自定义名时显示 Claude Code 生成的标题
 - ♻️ **文件变化实时同步**：监听 jsonl 增量更新，正在跑的会话实时追加；离开页面自动暂停 SSE
 - 📈 **统计仪表盘**：按项目 / 按日 / 按模型 / Top 消耗会话
-- 🎨 **柔和暗色主题**
+- 🎨 **三套主题**：暗色 / 亮色 / 蓝色（政务风）
 
 ---
 
@@ -78,8 +84,6 @@ claude-web
 npx claude-web-gyy
 ```
 
-第一次运行 Windows 防火墙弹窗 → 允许 **专用网络** 即可（公用网络不需要勾选，本服务只监听 localhost）。
-
 > 如果命令报"找不到 npx"，重启 PowerShell 或重启电脑让 Node 的 PATH 生效。
 >
 > 全局安装后 `claude-web` 命令报执行策略错误：以管理员身份打开 PowerShell 跑一次 `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`。
@@ -105,7 +109,7 @@ nohup npx claude-web-gyy > ~/claude-web.log 2>&1 &
 随时停止：
 
 ```bash
-lsof -ti :2888 | xargs kill
+lsof -ti tcp:2888 -sTCP:LISTEN | xargs kill
 ```
 
 **Windows（PowerShell）**
@@ -126,7 +130,7 @@ Get-NetTCPConnection -LocalPort 2888 | ForEach-Object { Stop-Process -Id $_.Owni
 
 | 项 | 默认值 | 说明 |
 |---|---|---|
-| **端口** | `2888` | 被占用时会自动杀掉占用进程，仍在 2888 启动 |
+| **端口** | `2888` | 已有 claude-web 实例时自动重启它；被其他程序占用则报错退出 |
 | **Claude 数据目录** | `~/.claude` | Claude Code 官方默认路径，本工具自动读 |
 | **自动开浏览器** | 开启 | 启动后约 600ms 自动 `open` 浏览器 |
 | **应用数据目录** | `<claudeDir>/claude-web/` | 自定义名 / tags / 置顶 / 收藏 都存这里 |
@@ -144,7 +148,7 @@ Get-NetTCPConnection -LocalPort 2888 | ForEach-Object { Stop-Process -Id $_.Owni
 
 | 参数 | 默认 | 作用 |
 |---|---|---|
-| `--port <number>` | `2888` | 指定监听端口；被占用时自动杀进程重启同端口 |
+| `--port <number>` | `2888` | 指定监听端口；已有 claude-web 实例时自动重启它，被其他程序占用则报错退出 |
 | `--no-open` | — | 启动后不自动打开浏览器（后台/服务器/容器/CI 场景） |
 | `-h`, `--help` | — | 打印帮助并退出 |
 
@@ -207,8 +211,8 @@ CLAUDE_DIR=/backup/colleague-claude PORT=9000 claude-web --no-open
 
 ## 数据安全
 
-- ✅ 只**读**访问 `~/.claude/projects/*.jsonl`，不修改你的对话历史
-- ✅ 服务**仅监听 `localhost`**，不对外暴露端口
+- ✅ 只**读**访问 `~/.claude/projects/*.jsonl`，不修改对话内容；唯一的例外是你手动点「删除」，会删除该会话的源文件且不可恢复
+- ✅ 服务**仅监听 `127.0.0.1`**，局域网内其他设备无法访问
 - ✅ 所有自定义数据落本地磁盘，**不上传任何东西到云端**
 - ✅ 完整源代码开放：<https://github.com/guyouyin/claude-web>
 
@@ -233,7 +237,7 @@ npm start
 |---|---|
 | 启动后页面空白 | 没装 Claude Code、或 claudeDir 路径不对。点右上角 ⚙ 设置正确路径 |
 | 浏览器没自动打开 | 用 `--no-open` 关掉，自己复制 `http://localhost:2888` 打开 |
-| 端口 2888 被占用 | 程序会自动杀掉占用进程并重启在 2888（macOS/Linux 用 lsof、Windows 用 netstat+taskkill） |
+| 端口 2888 被占用 | 占用者是 claude-web 时会自动重启；是其他程序时报错退出，用 `--port` 换一个端口 |
 | Windows 中文显示乱码 | 用 PowerShell 或 Windows Terminal，不要用老 cmd（GBK 编码） |
 | WSL 里启动后 Windows 浏览器访问不到 | WSL2 一般会自动转发；如果不行手动 `localhost:2888` 浏览器访问 |
 | 升级到最新版 | `npm install -g claude-web-gyy@latest` |
