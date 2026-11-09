@@ -2344,22 +2344,307 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape' && !statsOverlay.hidden) closeStats();
 });
 
-// ---- 主题切换（右上角下拉框） ----
-const THEMES = ['dark', 'light', 'blue'];
-const LS_THEME = 'cv.theme';
-const themeSelect = $('#theme-select');
+// ---- 主题：内置“默认”不可修改，其余是用户保存并命名的配色，存在服务端 config.json ----
+const THEME_FIELDS = [
+  { key: 'accent', label: '强调色', value: '#0c3ed4' },
+  { key: 'sidebarTop', label: '侧栏顶部', value: '#842fb1' },
+  { key: 'sidebarBottom', label: '侧栏底部', value: '#0c8cb6' },
+  { key: 'selectMark', label: '选中标记', value: '#ff4000' },
+  { key: 'messagesBg', label: '消息区背景', value: '#e8e8e8' },
+  { key: 'userBubble', label: '我的消息', value: '#e0edff' },
+  { key: 'assistantBubble', label: '系统消息', value: '#ffffff' },
+  { key: 'text', label: '文字', value: '#0a0a0a' },
+];
+const DEFAULT_COLORS = Object.fromEntries(THEME_FIELDS.map(f => [f.key, f.value]));
+const DEFAULT_THEME_ID = 'default';
+const LS_THEME_VARS = 'cv.themeVars'; // 上次的配色，index.html 头部读取，避免刷新时闪一下默认色
+const THEME_VAR_NAMES = [
+  '--accent', '--accent-2', '--accent-strong', '--accent-soft-bg', '--accent-soft-border',
+  '--bg-surface', '--bg-surface-2', '--bg-deep', '--bg-active', '--line-1', '--line-2', '--line-3',
+  '--sidebar-active', '--sidebar-active-tab', '--sidebar-active-tab-text', '--sidebar-bg',
+  '--sidebar-header-text', '--select-mark', '--messages-bg',
+  '--user-bubble-bg', '--user-bubble-border', '--assistant-bubble-bg', '--text-1', '--text-2', '--text-3', '--text-4',
+];
 
-function applyTheme(t) {
-  if (!THEMES.includes(t)) t = 'dark';
-  if (t === 'dark') document.documentElement.removeAttribute('data-theme');
-  else document.documentElement.setAttribute('data-theme', t);
-  // 只有暗色主题用深色代码块
-  $('#hljs-theme').href = `https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/${t === 'dark' ? 'github-dark' : 'github'}.min.css`;
-  themeSelect.value = t;
-  localStorage.setItem(LS_THEME, t);
+const themeStore = { themes: [], activeId: DEFAULT_THEME_ID, draft: null }; // draft：在“默认”上调整、尚未保存的配色
+const themeSelect = $('#theme-select');
+const themePanel = $('#theme-panel');
+const themePanelRows = $('#theme-panel-rows');
+const themePanelFoot = $('#theme-panel-foot');
+
+function activeTheme() {
+  return themeStore.themes.find(t => t.id === themeStore.activeId) || null;
 }
-applyTheme(localStorage.getItem(LS_THEME) || 'dark');
-themeSelect.addEventListener('change', () => applyTheme(themeSelect.value));
+function currentColors() {
+  const theme = activeTheme();
+  return theme ? theme.colors : (themeStore.draft || DEFAULT_COLORS);
+}
+
+const hexToRgb = hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
+function mixHex(a, b, t) {
+  const [x, y] = [hexToRgb(a), hexToRgb(b)];
+  return '#' + x.map((v, i) => Math.round(v + (y[i] - v) * t).toString(16).padStart(2, '0')).join('');
+}
+function hexContrast(a, b) {
+  const lum = hex => {
+    const [r, g, bl] = hexToRgb(hex).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+  };
+  const [hi, lo] = [lum(a), lum(b)].sort((p, q) => q - p);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+// 7 个配置色换算出全部 CSS 变量（style.css 里 :root 的默认值是同一公式对默认配色的结果）
+function themeVars(c) {
+  const rgb = hexToRgb(c.accent).join(', ');
+  const headerEnd = mixHex(c.sidebarTop, c.sidebarBottom, 0.16);
+  // 顶部区域的文字直接压在渐变上，按其中较难读的一端选白字或深字
+  const readable = color => Math.min(hexContrast(color, c.sidebarTop), hexContrast(color, headerEnd));
+  return {
+    '--accent': c.accent,
+    '--accent-2': mixHex(c.accent, '#ffffff', 0.15),
+    '--accent-strong': c.accent,
+    '--accent-soft-bg': `rgba(${rgb}, 0.08)`,
+    '--accent-soft-border': `rgba(${rgb}, 0.24)`,
+    '--bg-surface': mixHex(c.accent, '#ffffff', 0.94),
+    '--bg-surface-2': mixHex(c.accent, '#ffffff', 0.89),
+    '--bg-deep': mixHex(c.accent, '#ffffff', 0.92),
+    '--bg-active': mixHex(c.accent, '#ffffff', 0.86),
+    '--line-1': mixHex(c.accent, '#ffffff', 0.84),
+    '--line-2': mixHex(c.accent, '#ffffff', 0.74),
+    '--line-3': mixHex(c.accent, '#ffffff', 0.5),
+    '--sidebar-active': mixHex(c.accent, '#ffffff', 0.88),
+    '--sidebar-active-tab': mixHex(c.accent, '#ffffff', 0.82),
+    '--sidebar-active-tab-text': mixHex(c.accent, '#000000', 0.25),
+    '--sidebar-bg': `linear-gradient(180deg, ${c.sidebarTop} 0, ${headerEnd} 230px, ${mixHex(c.sidebarTop, c.sidebarBottom, 0.6)} 60%, ${c.sidebarBottom} 100%)`,
+    '--sidebar-header-text': readable('#ffffff') >= readable('#15394a') ? '#ffffff' : '#15394a',
+    '--select-mark': c.selectMark,
+    '--messages-bg': c.messagesBg,
+    '--user-bubble-bg': c.userBubble,
+    '--user-bubble-border': mixHex(c.userBubble, '#000000', 0.1),
+    '--assistant-bubble-bg': c.assistantBubble,
+    '--text-1': c.text,
+    '--text-2': mixHex(c.text, '#ffffff', 0.12),
+    '--text-3': mixHex(c.text, '#ffffff', 0.25),
+    '--text-4': mixHex(c.text, '#ffffff', 0.3),
+  };
+}
+
+function applyThemeColors() {
+  const root = document.documentElement.style;
+  THEME_VAR_NAMES.forEach(name => root.removeProperty(name));
+  const vars = themeVars(currentColors());
+  for (const [name, value] of Object.entries(vars)) root.setProperty(name, value);
+  try { localStorage.setItem(LS_THEME_VARS, JSON.stringify(vars)); } catch {}
+}
+
+async function saveThemes() {
+  try {
+    const res = await fetch('/api/themes', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ themes: themeStore.themes, activeId: themeStore.activeId }),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+  } catch (e) {
+    showError('保存主题失败: ' + e.message);
+  }
+}
+let saveThemesTimer = null;
+function saveThemesSoon() {
+  clearTimeout(saveThemesTimer);
+  saveThemesTimer = setTimeout(saveThemes, 300); // 拖动取色器时会连续触发
+}
+
+function renderThemeSelect() {
+  themeSelect.innerHTML = '';
+  themeSelect.add(new Option('默认', DEFAULT_THEME_ID));
+  for (const t of themeStore.themes) themeSelect.add(new Option(t.name, t.id));
+  themeSelect.value = themeStore.activeId;
+}
+
+function themeActionButton(text, onClick, danger) {
+  const btn = document.createElement('button');
+  btn.className = 'btn' + (danger ? ' btn-danger' : '');
+  btn.textContent = text;
+  btn.addEventListener('click', onClick);
+  return btn;
+}
+
+function renderThemePanel() {
+  const theme = activeTheme();
+  $('#theme-panel-title').textContent = (theme ? theme.name : '默认') + (themeStore.draft ? '（未保存）' : '');
+  const colors = currentColors();
+  themePanelRows.innerHTML = '';
+  for (const field of THEME_FIELDS) {
+    const row = document.createElement('label');
+    row.className = 'theme-row';
+    row.innerHTML = `
+      <span class="theme-row-label">${field.label}</span>
+      <span class="theme-row-hex">${colors[field.key]}</span>
+      <input type="color" value="${colors[field.key]}" />
+    `;
+    row.querySelector('input').addEventListener('input', (ev) => setThemeColor(field.key, ev.target.value, row));
+    themePanelRows.appendChild(row);
+  }
+  themePanelFoot.innerHTML = '';
+  if (theme) {
+    themePanelFoot.append(
+      themeActionButton('恢复默认', resetThemeColors),
+      themeActionButton('另存为', saveThemeAs),
+      themeActionButton('重命名', renameTheme),
+      themeActionButton('删除', deleteTheme, true),
+    );
+  } else {
+    if (themeStore.draft) themePanelFoot.append(themeActionButton('恢复默认', resetThemeColors));
+    themePanelFoot.append(themeActionButton('保存为新主题', saveThemeAs));
+  }
+}
+
+// 当前主题的颜色回到默认配色；已保存的主题保留名称
+function resetThemeColors() {
+  const theme = activeTheme();
+  if (theme) {
+    theme.colors = { ...DEFAULT_COLORS };
+    saveThemes();
+  } else {
+    themeStore.draft = null;
+  }
+  applyThemeColors();
+  renderThemePanel();
+}
+
+function setThemeColor(key, value, row) {
+  row.querySelector('.theme-row-hex').textContent = value;
+  const theme = activeTheme();
+  if (theme) {
+    theme.colors[key] = value;
+    saveThemesSoon();
+  } else {
+    const firstChange = !themeStore.draft;
+    themeStore.draft = { ...(themeStore.draft || DEFAULT_COLORS), [key]: value };
+    // 重建面板会打断正在拖动的取色器，所以只在按钮需要变化的第一次改动时更新底部和标题
+    if (firstChange) {
+      $('#theme-panel-title').textContent = '默认（未保存）';
+      themePanelFoot.prepend(themeActionButton('恢复默认', resetThemeColors));
+    }
+  }
+  applyThemeColors();
+}
+
+// 问主题名；取消、为空或重名时返回 null
+async function askThemeName(title, current, ignoreId) {
+  const input = await askDialog({ title, message: '主题名称', input: current });
+  if (input === null) return null;
+  const name = input.trim();
+  if (!name) { showError('主题名称不能为空'); return null; }
+  if (name.length > 30) { showError('主题名称不能超过 30 个字'); return null; }
+  if (name === '默认' || themeStore.themes.some(t => t.name === name && t.id !== ignoreId)) {
+    showError(`已有名为「${name}」的主题`);
+    return null;
+  }
+  return name;
+}
+
+async function saveThemeAs() {
+  const name = await askThemeName('保存为新主题', '');
+  if (!name) return;
+  const theme = {
+    id: 'theme-' + Math.random().toString(36).slice(2, 10),
+    name,
+    colors: { ...currentColors() },
+  };
+  themeStore.themes.push(theme);
+  themeStore.activeId = theme.id;
+  themeStore.draft = null;
+  renderThemeSelect();
+  renderThemePanel();
+  saveThemes();
+}
+
+async function renameTheme() {
+  const theme = activeTheme();
+  if (!theme) return;
+  const name = await askThemeName('重命名主题', theme.name, theme.id);
+  if (!name) return;
+  theme.name = name;
+  renderThemeSelect();
+  renderThemePanel();
+  saveThemes();
+}
+
+async function deleteTheme() {
+  const theme = activeTheme();
+  if (!theme) return;
+  const ok = await askDialog({ title: '删除主题', message: `删除主题「${theme.name}」？`, okText: '删除', danger: true });
+  if (!ok) return;
+  themeStore.themes = themeStore.themes.filter(t => t !== theme);
+  themeStore.activeId = DEFAULT_THEME_ID;
+  applyThemeColors();
+  renderThemeSelect();
+  renderThemePanel();
+  saveThemes();
+}
+
+themeSelect.addEventListener('change', () => {
+  themeStore.activeId = themeSelect.value;
+  themeStore.draft = null;
+  applyThemeColors();
+  if (!themePanel.hidden) renderThemePanel();
+  saveThemes();
+});
+$('#theme-panel-btn').addEventListener('click', () => {
+  themePanel.hidden = !themePanel.hidden;
+  if (!themePanel.hidden) renderThemePanel();
+});
+$('#theme-panel-close').addEventListener('click', () => { themePanel.hidden = true; });
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && !themePanel.hidden) themePanel.hidden = true;
+});
+// 点面板外关闭。主题切换控件和命名对话框属于调色流程，不算“外面”
+document.addEventListener('pointerdown', (ev) => {
+  if (themePanel.hidden) return;
+  if (ev.target.closest('#theme-panel, #theme-panel-btn, #theme-select, #dialog-modal')) return;
+  themePanel.hidden = true;
+});
+
+// 上一版把自定义颜色存在浏览器里，迁移成一个已保存的主题
+function migrateLocalTheme() {
+  let saved = null;
+  try {
+    saved = JSON.parse(localStorage.getItem('cv.customTheme') || 'null');
+    localStorage.removeItem('cv.customTheme');
+    localStorage.removeItem('cv.theme');
+  } catch {}
+  if (!saved || typeof saved !== 'object') return false;
+  const colors = { ...DEFAULT_COLORS };
+  for (const key of Object.keys(colors)) {
+    if (/^#[0-9a-f]{6}$/i.test(saved[key])) colors[key] = saved[key].toLowerCase();
+  }
+  if (THEME_FIELDS.every(f => colors[f.key] === f.value) || themeStore.themes.length) return false;
+  const id = 'theme-' + Math.random().toString(36).slice(2, 10);
+  themeStore.themes.push({ id, name: '我的主题', colors });
+  themeStore.activeId = id;
+  return true;
+}
+
+async function loadThemes() {
+  try {
+    const res = await fetch('/api/themes');
+    const data = await res.json();
+    // 补上配色项增加之前保存的主题缺少的颜色
+    themeStore.themes = (data.themes || []).map(t => ({ ...t, colors: { ...DEFAULT_COLORS, ...t.colors } }));
+    themeStore.activeId = activeThemeIdFrom(data);
+  } catch (e) { console.warn('主题加载失败', e); }
+  if (migrateLocalTheme()) saveThemes();
+  applyThemeColors();
+  renderThemeSelect();
+}
+function activeThemeIdFrom(data) {
+  return (data.themes || []).some(t => t.id === data.activeId) ? data.activeId : DEFAULT_THEME_ID;
+}
+renderThemeSelect();
+loadThemes();
 
 async function loadHomeDir() {
   try {

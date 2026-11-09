@@ -6,7 +6,13 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <link rel="icon" href="data:," />
   <link rel="stylesheet" href="style.css" />
-  <link rel="stylesheet" id="hljs-theme" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css" />
+  <script>
+    try {
+      const vars = JSON.parse(localStorage.getItem('cv.themeVars') || '{}');
+      for (const name in vars) document.documentElement.style.setProperty(name, vars[name]);
+    } catch {}
+  </script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github.min.css" />
 </head>
 <body>
   <div id="app">
@@ -141,12 +147,17 @@
     <img id="image-viewer-img" alt="消息中的图片" />
     <div class="image-viewer-info" id="image-viewer-info"></div>
   </div>
+  <div id="theme-panel" class="theme-panel" role="dialog" aria-label="主题颜色" hidden>
+    <div class="theme-panel-head">
+      <span id="theme-panel-title"></span>
+      <button class="tb-icon" id="theme-panel-close" title="关闭（Esc）" aria-label="关闭">×</button>
+    </div>
+    <div class="theme-panel-rows" id="theme-panel-rows"></div>
+    <div class="theme-panel-foot" id="theme-panel-foot"></div>
+  </div>
   <div class="topbar" id="topbar">
-    <select id="theme-select" class="topbar-select" title="切换主题">
-      <option value="dark">🌙 暗色</option>
-      <option value="light">☀️ 亮色</option>
-      <option value="blue">🔵 青蓝</option>
-    </select>
+    <select id="theme-select" class="topbar-select" title="切换主题"></select>
+    <button class="topbar-btn" id="theme-panel-btn" title="调整主题颜色" aria-label="调整主题颜色">🎨</button>
     <span class="topbar-divider"></span>
     <button class="topbar-btn" id="stats-btn" title="全局统计">📊</button>
     <button class="topbar-btn" id="refresh" title="重扫文件系统">↻</button>

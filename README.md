@@ -27,7 +27,7 @@ Claude Code 把你和 Claude 的每一次对话都以 `.jsonl` 形式保存在�
 - 🏷️ **自动标题**：没有自定义名时显示 Claude Code 生成的标题
 - ♻️ **文件变化实时同步**：监听 jsonl 增量更新，正在跑的会话实时追加；离开页面自动暂停 SSE
 - 📈 **统计仪表盘**：按项目 / 按日 / 按模型 / Top 消耗会话
-- 🎨 **三套主题**：暗色 / 亮色 / 青蓝
+- 🎨 **自定义主题**：调整配色并保存为命名主题，可随时切换、重命名、删除
 
 ---
 
@@ -196,7 +196,7 @@ CLAUDE_DIR=/backup/colleague-claude PORT=9000 claude-web --no-open
 
 ```
 <claudeDir>/claude-web/
-├── config.json            # tags 库 + tag 与会话的绑定
+├── config.json            # tags 库 + tag 与会话的绑定 + 保存的主题
 ├── session-names.json     # 会话自定义名映射
 ├── pinned.json            # 置顶 sessionId 列表
 └── favorite.json          # 收藏 sessionId 列表

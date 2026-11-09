@@ -1066,6 +1066,31 @@ app.put('/api/preferences/favorite', (req, res) => {
   res.json({ ok: true, favorite: [...favoriteSet] });
 });
 
+// ---------- 主题：用户保存并命名的配色，存在 config.json 的 themes 字段 ----------
+app.get('/api/themes', (req, res) => {
+  const saved = readConfigFile().themes || {};
+  res.json({ themes: Array.isArray(saved.list) ? saved.list : [], activeId: saved.activeId || 'default' });
+});
+
+app.put('/api/themes', (req, res) => {
+  const { themes, activeId } = req.body || {};
+  if (!Array.isArray(themes) || themes.length > 50) return res.status(400).json({ error: '主题列表无效' });
+  const isValid = t => t && typeof t.id === 'string' && /^[\w-]{1,40}$/.test(t.id)
+    && typeof t.name === 'string' && t.name.trim() && t.name.length <= 30
+    && t.colors && typeof t.colors === 'object' && Object.keys(t.colors).length <= 20
+    && Object.values(t.colors).every(c => typeof c === 'string' && /^#[0-9a-f]{6}$/i.test(c));
+  if (!themes.every(isValid)) return res.status(400).json({ error: '主题数据无效' });
+  const list = themes.map(({ id, name, colors }) => ({ id, name: name.trim(), colors }));
+  try {
+    writeConfigFile({
+      themes: { list, activeId: list.some(t => t.id === activeId) ? activeId : 'default' },
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+  res.json({ ok: true });
+});
+
 app.put('/api/sessions/:id/name', (req, res) => {
   const id = req.params.id;
   if (!sessionIndex.has(id)) return res.status(404).json({ error: '会话不存在' });
