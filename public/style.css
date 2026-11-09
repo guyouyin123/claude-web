@@ -48,90 +48,103 @@
   --highlight-bg: rgba(255, 211, 61, 0.22);
 }
 
-/* ===== 蓝色主题（blue）：雾白 + 蓝点缀 —— 大面积中性色，蓝色只留给选中项和主要操作 ===== */
+/* ===== 蓝色主题（blue）：青蓝渐变 + 白色圆角卡片 + 少量橙色点缀 ===== */
 :root[data-theme="blue"] {
-  --border: rgba(40, 55, 75, 0.10);
-  --border-strong: rgba(40, 55, 75, 0.18);
-  --hover: rgba(40, 55, 75, 0.04);
-  --shadow-sm: 0 1px 2px rgba(40, 55, 75, .06);
-  --shadow-md: 0 4px 14px rgba(40, 55, 75, .10);
+  --border: rgba(20, 90, 110, 0.12);
+  --border-strong: rgba(20, 90, 110, 0.20);
+  --hover: rgba(20, 110, 135, 0.05);
+  --shadow-sm: 0 1px 3px rgba(20, 90, 110, .08);
+  --shadow-md: 0 4px 14px rgba(20, 90, 110, .14);
   --bg-page: #ffffff;
-  --bg-surface: #f3f5f8;
-  --bg-surface-2: #e9edf2;
-  --bg-deep: #eef1f5;
-  --bg-active: #e4ecf6;
+  --bg-surface: #f0f8fb;
+  --bg-surface-2: #e3f2f7;
+  --bg-deep: #e9f5f9;
+  --bg-active: #dcf1f7;
   --bg-input: #ffffff;
-  --line-1: #e3e7ed;
-  --line-2: #d3d9e1;
-  --line-3: #aab4c1;
-  --text-1: #1f2d3d;
-  --text-2: #36465a;
-  --text-3: #55657a;
-  --text-4: #5f6e83;
-  --accent: #2f5f98;         /* 沉稳但不压抑的政务蓝 */
-  --accent-2: #44719f;
-  --accent-strong: #2f5f98;
-  --accent-soft-bg: rgba(47, 95, 152, 0.07);
-  --accent-soft-border: rgba(47, 95, 152, 0.20);
-  --green: #2c7355;
-  --red: #ad4238;
-  --yellow: #80631d;
-  --purple: #57578f;
+  --line-1: #d9ebf1;
+  --line-2: #c2dfe8;
+  --line-3: #93c0cf;
+  --text-1: #15394a;
+  --text-2: #2b4f60;
+  --text-3: #456a7b;
+  --text-4: #4c6f80;
+  --accent: #1a7391;         /* 青蓝 */
+  --accent-2: #2688a8;
+  --accent-strong: #1a7391;
+  --accent-soft-bg: rgba(26, 115, 145, 0.08);
+  --accent-soft-border: rgba(26, 115, 145, 0.24);
+  --green: #1f7a56;
+  --red: #b83f28;
+  --yellow: #855b00;
+  --purple: #4f5f9e;
   /* 浅色代码块，与 hljs github 配合（applyTheme 切换样式表） */
-  --code-bg: #f4f6f9;
-  --code-text: #2a3a4d;
-  --danger-bg: rgba(173, 66, 56, 0.08);
-  --danger-bg-hover: rgba(173, 66, 56, 0.16);
-  --highlight-bg: rgba(214, 170, 70, 0.28);
+  --code-bg: #f1f8fb;
+  --code-text: #1f4251;
+  --danger-bg: rgba(184, 63, 40, 0.08);
+  --danger-bg-hover: rgba(184, 63, 40, 0.16);
+  --highlight-bg: rgba(240, 170, 60, 0.30);
 }
-/* 侧栏：中性雾白，蓝色只留给选中项。在内部重新定义令牌，组件样式不用改 */
+/* 侧栏：上深下浅的青蓝渐变。白字只放在顶部深色段，其余内容都放进白色卡片，保证可读 */
 :root[data-theme="blue"] #sidebar {
-  --bg-page: #f5f7fa;
   --bg-surface: #ffffff;
-  --bg-surface-2: #eceff4;
-  --bg-active: #e7eef7;
-  --line-1: #e4e8ee;
-  --line-2: #d6dce4;
-  --text-4: #5a697e;
+  --bg-surface-2: #e3f2f7;
+  --bg-active: #e4f5fa;
+  background: linear-gradient(180deg, #22708a 0, #2b7f9b 230px, #58b3cc 60%, #7dd0e4 100%);
+  border-right: none;
+}
+:root[data-theme="blue"] #sidebar .sidebar-header,
+:root[data-theme="blue"] #sidebar .project-body { background: transparent; border-bottom: none; }
+:root[data-theme="blue"] #sidebar .title,
+:root[data-theme="blue"] #sidebar .filter-label,
+:root[data-theme="blue"] #sidebar .stats { color: #fff; }
+:root[data-theme="blue"] #sidebar .filter-tab.active { background: #d5f0f7; color: #125a73; }
+:root[data-theme="blue"] #sidebar .filter-tag { background: #fff !important; }
+:root[data-theme="blue"] #sidebar .filter-tag.on { background: #d5f0f7 !important; }
+:root[data-theme="blue"] #sidebar .project-header {
+  margin: 0 8px 6px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.92);
+}
+:root[data-theme="blue"] #sidebar .project-header:hover { background: #fff; }
+:root[data-theme="blue"] #sidebar .session-item {
+  margin: 0 8px 8px;
+  padding-left: 14px;
+  border: none;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 2px 6px rgba(15, 80, 100, 0.16);
+}
+:root[data-theme="blue"] #sidebar .session-item:hover { background: #f4fbfd; }
+:root[data-theme="blue"] #sidebar .session-item.active {
+  background: var(--bg-active);
+  box-shadow: inset 3px 0 0 #f0663a, 0 2px 6px rgba(15, 80, 100, 0.16); /* 图中的橙色点缀 */
+}
+:root[data-theme="blue"] #sidebar .session-item.is-pinned:not(.active) {
+  box-shadow: inset 3px 0 0 var(--yellow), 0 2px 6px rgba(15, 80, 100, 0.16);
 }
 :root[data-theme="blue"] #sidebar .time-date { color-scheme: light; }
-/* 花费不是状态，用普通文字（统计页不受影响） */
-:root[data-theme="blue"] .session-cost-line { color: var(--text-4); }
-:root[data-theme="blue"] .session-cost-line b { color: var(--text-2); font-weight: 600; }
-:root[data-theme="blue"] .tk-chip.tk-cost,
-:root[data-theme="blue"] .tk-chip.tk-cost b { color: var(--text-1); }
-:root[data-theme="blue"] .tk-chip.tk-cost { background: var(--bg-surface); border-color: var(--border); }
-/* 删除平时是中性色，悬停才变红 */
-:root[data-theme="blue"] .session-delete-btn {
-  background: var(--line-1) !important;
-  border-color: var(--line-2) !important;
-  color: var(--text-3) !important;
+/* 状态栏（token、进度条、花费、卡片操作按钮）的颜色与亮色主题一致 */
+:root[data-theme="blue"] .session-tokens,
+:root[data-theme="blue"] .session-cost-line,
+:root[data-theme="blue"] .session-actions,
+:root[data-theme="blue"] .h-tokens {
+  --green: #34c759;
+  --red: #ff3b30;
+  --yellow: #ff9500;
+  --purple: #af52de;
+  --danger-bg: rgba(255, 59, 48, 0.10);
+  --danger-bg-hover: rgba(255, 59, 48, 0.20);
 }
-:root[data-theme="blue"] .session-delete-btn:hover {
-  background: var(--danger-bg-hover) !important;
-  color: var(--red) !important;
-}
-/* 重命名不是主要操作，从实心蓝改成浅色 */
-:root[data-theme="blue"] .rename-btn {
-  background: var(--accent-soft-bg);
-  border-color: var(--accent-soft-border);
-  color: var(--accent);
-  box-shadow: none;
-}
-:root[data-theme="blue"] .rename-btn:hover,
-:root[data-theme="blue"] .rename-btn:active { background: var(--bg-active); }
 /* 标签色来自用户设置（行内样式），在浅底上当文字色太淡，只保留彩色边框 */
 :root[data-theme="blue"] .tag-chip { color: var(--text-1) !important; }
 :root[data-theme="blue"] #sidebar ::-webkit-scrollbar-thumb,
 :root[data-theme="blue"] .session-list::-webkit-scrollbar-thumb {
-  background: rgba(40, 55, 75, 0.20);
+  background: rgba(255, 255, 255, 0.55);
   background-clip: padding-box;
 }
 /* 消息区用浅灰底，白色卡片才有层次 */
-:root[data-theme="blue"] .messages { background: #f6f7f9; }
-:root[data-theme="blue"] .msg-user { background: #edf2f8; border-color: #dfe6ef; }
-/* 红绿渐变太跳，进度条用单一蓝色 */
-:root[data-theme="blue"] .ctx-bar-fill { background: var(--accent); }
+:root[data-theme="blue"] .messages { background: #f2f9fb; }
+:root[data-theme="blue"] .msg-user { background: #e2f4f9; border-color: #c6e7f0; }
 /* 默认滚动条是白色半透明，在浅色内容区上看不见 */
 :root[data-theme="blue"] .detail-main ::-webkit-scrollbar-thumb,
 :root[data-theme="blue"] .messages::-webkit-scrollbar-thumb,
@@ -452,7 +465,19 @@ html, body {
   border-color: var(--yellow);
   color: var(--yellow);
 }
-.session-copy-btn.copied {
+/* 复制命令是最常用的操作，用强调色高亮（加 .session-item 和 !important 才能盖过后面的 .icon-btn 边框规则） */
+.session-item .session-copy-btn {
+  background: var(--accent-soft-bg);
+  border-color: var(--accent-soft-border) !important;
+  color: color-mix(in srgb, var(--accent) 78%, var(--text-1)); /* 12px 小字，比强调色再深一点才读得清 */
+  font-weight: 500;
+}
+.session-item .session-copy-btn:hover {
+  background: var(--accent-soft-border);
+  color: color-mix(in srgb, var(--accent) 78%, var(--text-1));
+}
+.session-item .session-copy-btn.copied,
+.session-item .session-copy-btn.copied:hover {
   background: var(--accent-strong);
   color: #fff;
   border-color: var(--accent-strong);
