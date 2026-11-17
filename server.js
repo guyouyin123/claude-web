@@ -15,10 +15,12 @@ const chokidar = require('chokidar');
 //     ├── config.json              tags 库 + 分配
 //     ├── session-names.json       会话自定义名映射
 //     ├── pinned.json              置顶会话 id 数组
-//     └── favorite.json            收藏会话 id 数组
+//     ├── favorite.json            收藏会话 id 数组
+//     └── shared.json              已分享会话 id 数组（分享端口只放行这些）
 //
 // 优先级：env CLAUDE_DIR > bootstrap.json.claudeDir > ~/.claude
 // 优先级：env PORT > --port > bootstrap.json.port > 2888
+// 分享端口：env SHARE_PORT > --share-port > 主端口 + 1
 
 function ensureDir(p) {
   if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
@@ -116,6 +118,7 @@ let sessionNames = {};
 // 置顶 / 收藏：Set<sessionId>
 let pinnedSet = new Set();
 let favoriteSet = new Set();
+let sharedSet = new Set();
 
 function loadNames() {
   sessionNames = readJsonOr(appPath('session-names.json'), {}) || {};
@@ -138,6 +141,14 @@ function loadFavorite() {
 }
 function saveFavorite() {
   atomicWriteJson(appPath('favorite.json'), [...favoriteSet]);
+}
+
+function loadShared() {
+  const arr = readJsonOr(appPath('shared.json'), []);
+  sharedSet = new Set(Array.isArray(arr) ? arr : []);
+}
+function saveShared() {
+  atomicWriteJson(appPath('shared.json'), [...sharedSet]);
 }
 
 // ---------- Tag 系统 ----------
@@ -670,6 +681,7 @@ function metaWithName(meta) {
     ...meta,
     customName: sessionNames[meta.sessionId] || '',
     tags: tagAssignments[meta.sessionId] || [],
+    shared: sharedSet.has(meta.sessionId),
   };
 }
 
@@ -703,7 +715,7 @@ app.get('/api/sessions', (req, res) => {
   res.json({ total: list.length, sessions: list });
 });
 
-app.get('/api/sessions/:id', async (req, res) => {
+async function getSession(req, res) {
   const entry = sessionIndex.get(req.params.id);
   if (!entry) return res.status(404).json({ error: 'not found' });
   try {
@@ -712,9 +724,9 @@ app.get('/api/sessions/:id', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
-});
+}
 
-app.get('/api/sessions/:id/agents/:agentId', async (req, res) => {
+async function getAgent(req, res) {
   const entry = sessionIndex.get(req.params.id);
   const file = entry && agentFilePath(entry, req.params.agentId);
   if (!file) return res.status(404).json({ error: 'not found' });
@@ -724,10 +736,10 @@ app.get('/api/sessions/:id/agents/:agentId', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
-});
+}
 
 // 图片以 base64 存在 jsonl 里，总量可达上百 MB，不随消息返回，按需从文件取
-app.get('/api/sessions/:id/images/:uuid/:index', async (req, res) => {
+async function getImage(req, res) {
   const entry = sessionIndex.get(req.params.id);
   if (!entry) return res.status(404).end();
   const file = req.query.agent ? agentFilePath(entry, String(req.query.agent)) : entry.filePath;
@@ -756,7 +768,32 @@ app.get('/api/sessions/:id/images/:uuid/:index', async (req, res) => {
     'X-Content-Type-Options': 'nosniff',
   });
   res.send(Buffer.from(image.source.data, 'base64'));
+}
+
+app.get('/api/sessions/:id', getSession);
+app.get('/api/sessions/:id/agents/:agentId', getAgent);
+app.get('/api/sessions/:id/images/:uuid/:index', getImage);
+
+// ---------- 分享：独立端口监听所有网卡，只读且只放行已分享的会话 ----------
+const shareApp = express();
+shareApp.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
 });
+shareApp.use(express.static(path.join(__dirname, 'public')));
+const onlyShared = (req, res, next) => (sharedSet.has(req.params.id) ? next() : res.status(404).json({ error: '会话未分享或已取消分享' }));
+shareApp.get('/api/sessions/:id', onlyShared, getSession);
+shareApp.get('/api/sessions/:id/agents/:agentId', onlyShared, getAgent);
+shareApp.get('/api/sessions/:id/images/:uuid/:index', onlyShared, getImage);
+
+function lanIps() {
+  return Object.values(os.networkInterfaces()).flat()
+    .filter(i => i && i.family === 'IPv4' && !i.internal)
+    .map(i => i.address);
+}
+function shareUrls(id) {
+  return lanIps().map(ip => `http://${ip}:${CONFIG.sharePort}/?share=${id}`);
+}
 
 app.post('/api/refresh', async (req, res) => {
   await buildIndex();
@@ -1047,6 +1084,15 @@ app.put('/api/sessions/:id/tags', (req, res) => {
   res.json({ ok: true, sessionId: sid, tags: tagAssignments[sid] || [] });
 });
 
+app.put('/api/sessions/:id/share', (req, res) => {
+  const id = req.params.id;
+  if (!sessionIndex.has(id)) return res.status(404).json({ error: '会话不存在' });
+  if (req.body && req.body.shared) sharedSet.add(id);
+  else sharedSet.delete(id);
+  try { saveShared(); } catch (e) { return res.status(500).json({ error: e.message }); }
+  res.json({ ok: true, shared: sharedSet.has(id), urls: shareUrls(id), shareListening: !!shareServer });
+});
+
 // ---------- Pinned / Favorite ----------
 app.get('/api/preferences', (req, res) => {
   res.json({ pinned: [...pinnedSet], favorite: [...favoriteSet] });
@@ -1141,6 +1187,7 @@ app.post('/api/config', async (req, res) => {
   loadTags();
   loadPinned();
   loadFavorite();
+  loadShared();
   await buildIndex();
   startWatcher();
   res.json({
@@ -1174,6 +1221,16 @@ function killPortOccupant(port) {
       execFile('sh', ['-c', `lsof -ti tcp:${port} -sTCP:LISTEN | xargs -r kill -9`], () => resolve());
     }
   });
+}
+
+let shareServer = null;
+function startShareServer() {
+  const srv = shareApp.listen(CONFIG.sharePort, '0.0.0.0');
+  srv.once('listening', () => {
+    shareServer = srv;
+    console.log(`✓ 分享端口已开启: ${CONFIG.sharePort}（局域网只读，仅已分享会话）`);
+  });
+  srv.once('error', e => console.warn(`⚠ 分享端口 ${CONFIG.sharePort} 启动失败（${e.code || e.message}），分享功能不可用，可用 --share-port 换一个`));
 }
 
 function listenOnce(app, port) {
@@ -1223,12 +1280,14 @@ async function listenWithRestart(app, port) {
 选项:
   --no-open          启动后不自动打开浏览器
   --port <number>    指定端口（默认 ${DEFAULT_PORT}；已有 claude-web 实例时自动重启它，被其他程序占用则报错退出）
+  --share-port <n>   分享端口（默认主端口 + 1），监听所有网卡，只能只读查看已分享的会话
   -h, --help         显示帮助
 
 环境变量:
   CLAUDE_DIR         覆盖 Claude 数据目录（默认 ~/.claude）
   CLAUDE_WEB_HOME    覆盖 bootstrap 配置目录（默认 ~/.claude-web）
   PORT               覆盖端口
+  SHARE_PORT         覆盖分享端口
 
 数据存放:
   bootstrap (claudeDir 路径覆盖) → ~/.claude-web/bootstrap.json
@@ -1241,6 +1300,10 @@ async function listenWithRestart(app, port) {
     const p = parseInt(args[portIdx + 1], 10);
     if (Number.isFinite(p)) CONFIG.port = p;
   }
+  const sharePortIdx = args.indexOf('--share-port');
+  const sharePortArg = sharePortIdx >= 0 ? parseInt(args[sharePortIdx + 1], 10) : NaN;
+  CONFIG.sharePort = Number(process.env.SHARE_PORT) || (Number.isFinite(sharePortArg) ? sharePortArg : 0)
+    || (CONFIG.port || DEFAULT_PORT) + 1;
 
   console.log('claudeDir   :', CONFIG.claudeDir);
   console.log('应用数据目录:', APP_DIR);
@@ -1250,6 +1313,7 @@ async function listenWithRestart(app, port) {
   loadTags();
   loadPinned();
   loadFavorite();
+  loadShared();
   console.log(`已加载 ${Object.keys(sessionNames).length} 个自定义名、${tagLibrary.length} 个 tag、${pinnedSet.size} 个置顶、${favoriteSet.size} 个收藏`);
   await buildIndex();
   startWatcher();
@@ -1257,6 +1321,7 @@ async function listenWithRestart(app, port) {
     const { port } = await listenWithRestart(app, CONFIG.port || DEFAULT_PORT);
     const url = `http://localhost:${port}`;
     console.log(`\n✓ 服务已启动: ${url}`);
+    startShareServer();
     if (!fs.existsSync(PROJECTS_DIR)) {
       console.log(`⚠ 未发现 ${PROJECTS_DIR}，请打开页面右上角 ⚙ 配置正确的 Claude 目录。`);
     }

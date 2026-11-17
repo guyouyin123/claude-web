@@ -2,6 +2,9 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 
 const PAGE_SIZE = 20;
+// 分享模式：别的电脑通过分享端口打开 /?share=<sessionId>，只读查看这一个会话
+const SHARE_ID = new URLSearchParams(location.search).get('share');
+if (SHARE_ID) document.body.classList.add('share-mode');
 const LS_PINNED = 'claude_viewer.pinned';
 const LS_FAVORITE = 'claude_viewer.favorite';
 
@@ -372,21 +375,64 @@ function toggleFavorite(id) {
   persistFavorite();
 }
 
-async function copyResumeCommand(sessionId, btn) {
-  const text = `/resume ${sessionId}`;
+async function toggleShare(m) {
+  const setShared = async (shared) => {
+    const res = await fetch(`/api/sessions/${m.sessionId}/share`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ shared }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '请求失败');
+    return data;
+  };
   try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
+    if (!m.shared) {
+      const data = await setShared(true);
+      m.shared = true;
+      renderDetailHeader(m);
+      if (!data.urls.length) return showError('已分享，但未检测到局域网 IP');
+      const tip = data.shareListening ? '' : '\n⚠ 分享端口未启动，请查看服务端日志';
+      const others = data.urls.length > 1 ? `\n其他网卡：\n${data.urls.slice(1).join('\n')}` : '';
+      const url = await askDialog({
+        title: '已开启分享',
+        message: `同一局域网的电脑用浏览器打开下面地址即可只读查看${others}${tip}`,
+        input: data.urls[0], okText: '复制链接',
+      });
+      if (url) await copyText(url);
     } else {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
+      const data = await setShared(true); // 幂等，用来取当前链接
+      const ok = await askDialog({
+        title: '分享中',
+        message: `当前分享链接：\n${data.urls.join('\n')}\n\n取消后对方将无法再打开。`,
+        okText: '取消分享', danger: true,
+      });
+      if (!ok) return;
+      await setShared(false);
+      m.shared = false;
+      renderDetailHeader(m);
     }
+  } catch (e) {
+    showError('分享失败: ' + e.message);
+  }
+}
+
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+  } else {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  }
+}
+
+async function copyResumeCommand(sessionId, btn) {
+  try {
+    await copyText(`/resume ${sessionId}`);
     const original = btn.textContent;
     btn.textContent = '已复制';
     btn.classList.add('copied');
@@ -548,6 +594,7 @@ function renderDetailHeader(m) {
     <div class="h-title-row">
       ${nameDisplay}
       <button class="rename-btn" title="重命名当前会话">✎ 重命名</button>
+      <button class="rename-btn share-btn" title="局域网内其他电脑可通过链接只读查看">${m.shared ? '🔗 分享中' : '🔗 分享'}</button>
     </div>
     <div class="h-info">
       ${fmtTime(m.startTime)} → ${fmtTime(m.endTime)}　·
@@ -560,6 +607,7 @@ function renderDetailHeader(m) {
   detailHeader.querySelector('.rename-btn').addEventListener('click', () => {
     promptRename(m.sessionId, m.customName || '');
   });
+  detailHeader.querySelector('.share-btn').addEventListener('click', () => toggleShare(m));
   detailHeader.querySelector('#h-tag-add').addEventListener('change', (ev) => {
     const tid = ev.target.value;
     if (!tid) return;
@@ -2644,7 +2692,7 @@ function activeThemeIdFrom(data) {
   return (data.themes || []).some(t => t.id === data.activeId) ? data.activeId : DEFAULT_THEME_ID;
 }
 renderThemeSelect();
-loadThemes();
+if (!SHARE_ID) loadThemes();
 
 async function loadHomeDir() {
   try {
@@ -2653,11 +2701,15 @@ async function loadHomeDir() {
   } catch (e) { console.warn('config 加载失败', e); }
 }
 
-// 启动顺序：tag 库 + 用户偏好（pin/fav）+ home 目录 → 再拉会话列表
-Promise.all([loadTagLibrary(), loadPreferences(), loadHomeDir()]).then(() => {
-  renderTagFilterRow();
-  loadSessions();
-});
+// 启动顺序：tag 库 + 用户偏好（pin/fav）+ home 目录 → 再拉会话列表；分享模式直接打开被分享的会话
+if (SHARE_ID) {
+  selectSession(SHARE_ID);
+} else {
+  Promise.all([loadTagLibrary(), loadPreferences(), loadHomeDir()]).then(() => {
+    renderTagFilterRow();
+    loadSessions();
+  });
+}
 
 // ---- SSE：文件变化自动同步（离开页面时暂停）----
 let eventSource = null;
@@ -2756,6 +2808,7 @@ function stopSSE() {
 }
 
 document.addEventListener('visibilitychange', () => {
+  if (SHARE_ID) return;
   if (document.hidden) {
     stopSSE();
   } else {
@@ -2764,4 +2817,4 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-if (!document.hidden) startSSE();
+if (!document.hidden && !SHARE_ID) startSSE();
