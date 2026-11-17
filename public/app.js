@@ -2684,7 +2684,7 @@ async function loadThemes() {
     themeStore.themes = (data.themes || []).map(t => ({ ...t, colors: { ...DEFAULT_COLORS, ...t.colors } }));
     themeStore.activeId = activeThemeIdFrom(data);
   } catch (e) { console.warn('主题加载失败', e); }
-  if (migrateLocalTheme()) saveThemes();
+  if (!SHARE_ID && migrateLocalTheme()) saveThemes();
   applyThemeColors();
   renderThemeSelect();
 }
@@ -2692,7 +2692,7 @@ function activeThemeIdFrom(data) {
   return (data.themes || []).some(t => t.id === data.activeId) ? data.activeId : DEFAULT_THEME_ID;
 }
 renderThemeSelect();
-if (!SHARE_ID) loadThemes();
+loadThemes();
 
 async function loadHomeDir() {
   try {

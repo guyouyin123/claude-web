@@ -1113,10 +1113,12 @@ app.put('/api/preferences/favorite', (req, res) => {
 });
 
 // ---------- 主题：用户保存并命名的配色，存在 config.json 的 themes 字段 ----------
-app.get('/api/themes', (req, res) => {
+function getThemes(req, res) {
   const saved = readConfigFile().themes || {};
   res.json({ themes: Array.isArray(saved.list) ? saved.list : [], activeId: saved.activeId || 'default' });
-});
+}
+app.get('/api/themes', getThemes);
+shareApp.get('/api/themes', getThemes); // 分享页跟分享者用同一套配色
 
 app.put('/api/themes', (req, res) => {
   const { themes, activeId } = req.body || {};
