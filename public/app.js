@@ -32,7 +32,7 @@ const state = {
   currentId: null,
   query: '',
   rendered: 0,
-  filter: 'all',       // 'all' | 'pinned' | 'favorite'
+  filter: 'all',       // 'all' | 'pinned' | 'favorite' | 'shared'
   pinned: new Set(),      // 启动时从 /api/preferences 拉
   favorite: new Set(),    // 启动时从 /api/preferences 拉
   timeRange: localStorage.getItem(LS_TIME_RANGE) || 'all',
@@ -195,6 +195,8 @@ function applyFilterAndSort() {
     list = list.filter(s => state.pinned.has(s.sessionId));
   } else if (state.filter === 'favorite') {
     list = list.filter(s => state.favorite.has(s.sessionId));
+  } else if (state.filter === 'shared') {
+    list = list.filter(s => s.shared);
   }
   const [tFrom, tTo] = getTimeRangeBounds();
   if (tFrom || tTo) {
@@ -217,7 +219,7 @@ function applyFilterAndSort() {
   const timeNote = (tFrom || tTo) ? '（时间已过滤）' : '';
   let label;
   if (state.filter !== 'all') {
-    const name = state.filter === 'pinned' ? '置顶' : '收藏';
+    const name = { pinned: '置顶', favorite: '收藏', shared: '已分享' }[state.filter];
     label = `${name} ${total} 个 ${timeNote}`;
   } else if (state.query) {
     label = `匹配 ${total} 个会话 ${timeNote}`;
@@ -384,11 +386,18 @@ async function toggleShare(m) {
     if (!res.ok) throw new Error(data.error || '请求失败');
     return data;
   };
+  // 同步侧栏列表里的分享状态，「已分享」筛选随之更新
+  const syncList = () => {
+    const s = state.allSessions.find(x => x.sessionId === m.sessionId);
+    if (s) s.shared = m.shared;
+    applyFilterAndSort();
+  };
   try {
     if (!m.shared) {
       const data = await setShared(true);
       m.shared = true;
       renderDetailHeader(m);
+      syncList();
       if (!data.urls.length) return showError('已分享，但未检测到局域网 IP');
       const tip = data.shareListening ? '' : '\n⚠ 分享端口未启动，请查看服务端日志';
       const others = data.urls.length > 1 ? `\n其他网卡：\n${data.urls.slice(1).join('\n')}` : '';
@@ -409,6 +418,7 @@ async function toggleShare(m) {
       await setShared(false);
       m.shared = false;
       renderDetailHeader(m);
+      syncList();
     }
   } catch (e) {
     showError('分享失败: ' + e.message);
