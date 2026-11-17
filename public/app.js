@@ -2,7 +2,7 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 
 const PAGE_SIZE = 20;
-// 分享模式：别的电脑通过分享端口打开 /?share=<sessionId>，只读查看这一个会话
+// 分享模式：别的电脑通过分享端口打开 /?share=<sessionId>，只读查看；侧栏只列出已分享的会话
 const SHARE_ID = new URLSearchParams(location.search).get('share');
 if (SHARE_ID) document.body.classList.add('share-mode');
 const LS_PINNED = 'claude_viewer.pinned';
@@ -468,7 +468,7 @@ function renderList() {
     const bt = b[1][0] && b[1][0].endTime || '';
     return bt.localeCompare(at);
   });
-  const isSearching = !!(state.query || state.selectedTagFilter.size || state.filter !== 'all');
+  const isSearching = !!(SHARE_ID || state.query || state.selectedTagFilter.size || state.filter !== 'all');
   for (const [projectPath, sessions] of sortedGroups) {
     listEl.appendChild(createProjectNode(projectPath, sessions, isSearching));
   }
@@ -521,6 +521,7 @@ function renderProjectSessions(body, sessions) {
 
 async function selectSession(id) {
   state.currentId = id;
+  if (SHARE_ID) history.replaceState(null, '', `?share=${encodeURIComponent(id)}`); // 刷新或复制地址仍停在当前会话
   $$('.session-item').forEach(el => el.classList.toggle('active', el.dataset.id === id));
   emptyTip.hidden = true;
   detailContent.hidden = false;
@@ -2703,6 +2704,7 @@ async function loadHomeDir() {
 
 // 启动顺序：tag 库 + 用户偏好（pin/fav）+ home 目录 → 再拉会话列表；分享模式直接打开被分享的会话
 if (SHARE_ID) {
+  loadSessions();
   selectSession(SHARE_ID);
 } else {
   Promise.all([loadTagLibrary(), loadPreferences(), loadHomeDir()]).then(() => {

@@ -1859,8 +1859,9 @@ body:has(.modal:not([hidden])) .topbar { display: none; }
 }
 
 
-/* 分享模式：只读查看单个会话，隐藏侧栏、顶栏和编辑入口 */
-.share-mode #sidebar,
+/* 分享模式：只读，侧栏只列已分享会话；隐藏顶栏、置顶/收藏和各类编辑入口 */
+.share-mode #filter-tabs,
+.share-mode .session-actions,
 .share-mode #topbar,
 .share-mode .rename-btn,
 .share-mode .h-tags-row { display: none; }

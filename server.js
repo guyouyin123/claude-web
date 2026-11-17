@@ -685,12 +685,15 @@ function metaWithName(meta) {
   };
 }
 
-app.get('/api/sessions', (req, res) => {
+// onlyShared：分享端口只列出已分享的会话
+function listSessions(req, res, onlyShared = false) {
   const q = (req.query.q || '').toString().trim().toLowerCase();
   const tagFilter = (req.query.tags || '').toString().trim();
   const requiredTags = tagFilter ? tagFilter.split(',').filter(Boolean) : [];
 
-  let list = Array.from(sessionIndex.values()).map(e => metaWithName(e.meta));
+  let list = Array.from(sessionIndex.values())
+    .filter(e => !onlyShared || sharedSet.has(e.meta.sessionId))
+    .map(e => metaWithName(e.meta));
 
   if (q) {
     const tagNameMap = new Map(tagLibrary.map(t => [t.id, (t.name || '').toLowerCase()]));
@@ -713,7 +716,8 @@ app.get('/api/sessions', (req, res) => {
 
   list.sort((a, b) => (b.endTime || '').localeCompare(a.endTime || ''));
   res.json({ total: list.length, sessions: list });
-});
+}
+app.get('/api/sessions', (req, res) => listSessions(req, res));
 
 async function getSession(req, res) {
   const entry = sessionIndex.get(req.params.id);
@@ -782,6 +786,7 @@ shareApp.use((req, res, next) => {
 });
 shareApp.use(express.static(path.join(__dirname, 'public')));
 const onlyShared = (req, res, next) => (sharedSet.has(req.params.id) ? next() : res.status(404).json({ error: '会话未分享或已取消分享' }));
+shareApp.get('/api/sessions', (req, res) => listSessions(req, res, true));
 shareApp.get('/api/sessions/:id', onlyShared, getSession);
 shareApp.get('/api/sessions/:id/agents/:agentId', onlyShared, getAgent);
 shareApp.get('/api/sessions/:id/images/:uuid/:index', onlyShared, getImage);
